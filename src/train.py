@@ -12,13 +12,13 @@ the two-stage design "effectively end-to-end".
 """
 
 import argparse
-import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import Dataset, DataLoader
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset
 
 from model import RestaurantEncoder
 
@@ -59,12 +59,19 @@ def build_training_data(max_history: int):
         hist_items[u, :k] = items
         hist_ratings[u, :k] = rats
         hist_mask[u, :k] = True
+        # A (user, positive) pair is only valid if the user has >=1 OTHER rated
+        # restaurant: after leave-one-out removes the positive, an empty history
+        # gives a zero user_emb, whose F.normalize gradient is ~1/norm -> explodes
+        # to NaN. ~11 users rate a single restaurant repeatedly and hit this.
+        distinct = set(grp.r_idx.to_numpy().tolist())
         for r_idx, stars in zip(grp.r_idx.to_numpy(), grp.stars.to_numpy()):
-            if stars >= POSITIVE_THRESHOLD:
+            if stars >= POSITIVE_THRESHOLD and len(distinct - {int(r_idx)}) > 0:
                 positives.append((u, int(r_idx)))
 
     global_mean = float(train.stars.mean())
-    print(f"{n_users:,} users | {n_restaurants:,} restaurants | {len(positives):,} positive interactions")
+    print(
+        f"{n_users:,} users | {n_restaurants:,} restaurants | {len(positives):,} positive interactions"
+    )
 
     return {
         "n_users": n_users,
@@ -75,6 +82,8 @@ def build_training_data(max_history: int):
         "positives": positives,
         "global_mean": global_mean,
         "features": feats,
+        "user_to_idx": user_to_idx,
+        "biz_to_idx": biz_to_idx,
     }
 
 
@@ -108,11 +117,11 @@ class BPRDataset(Dataset):
 # ---------------------------------------------------------------------------
 def aggregate_user_emb(
     encoder: RestaurantEncoder,
-    user_idx: torch.Tensor,      # (B,)
-    exclude: torch.Tensor,       # (B,) the positive r_idx to leave out of each history
-    hist_items: torch.Tensor,    # (n_users, H) padded restaurant indices
+    user_idx: torch.Tensor,  # (B,)
+    exclude: torch.Tensor,  # (B,) the positive r_idx to leave out of each history
+    hist_items: torch.Tensor,  # (n_users, H) padded restaurant indices
     hist_ratings: torch.Tensor,  # (n_users, H) padded raw stars
-    hist_mask: torch.Tensor,     # (n_users, H) bool
+    hist_mask: torch.Tensor,  # (n_users, H) bool
     global_mean: float,
 ) -> torch.Tensor:
     """Build (B, dim) L2-normalized user embeddings from rated-restaurant history.
@@ -133,7 +142,23 @@ def aggregate_user_emb(
        about what to divide by so a confident user and a lukewarm one are comparable.
     Q: L2-normalize the result so score = dot = cosine.
     """
-    raise NotImplementedError
+    items = hist_items[user_idx]
+    ratings = hist_ratings[user_idx]
+    mask = hist_mask[user_idx]
+
+    loo_mask = mask & (items != exclude.unsqueeze(1))
+
+    N, H = items.shape
+    items = items.reshape(-1)
+    loo_mask_1d = loo_mask.reshape(-1).unsqueeze(-1)
+    rating_dev = (ratings - global_mean).reshape(-1).unsqueeze(-1)
+    rating_count = loo_mask.sum(dim=1).clamp(min=1).unsqueeze(-1)
+
+    emb = encoder(items)
+    emb = emb * loo_mask_1d * rating_dev
+    emb = emb.reshape(N, H, -1).sum(dim=1) / rating_count
+    emb = F.normalize(emb, dim=1)
+    return emb
 
 
 def bpr_loss(pos_score: torch.Tensor, neg_score: torch.Tensor) -> torch.Tensor:
@@ -142,7 +167,7 @@ def bpr_loss(pos_score: torch.Tensor, neg_score: torch.Tensor) -> torch.Tensor:
     Q: -log sigmoid(pos_score - neg_score), averaged over the batch. Use
        F.logsigmoid for numerical stability (not log(sigmoid(...))).
     """
-    raise NotImplementedError
+    return -F.logsigmoid(pos_score - neg_score).mean()
 
 
 # ---------------------------------------------------------------------------
@@ -152,21 +177,32 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--batch-size", type=int, default=1024)
-    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--lr", type=float, default=3e-4)  # 1e-3 caused dying-ReLU collapse
+    p.add_argument("--clip", type=float, default=1.0)  # grad-norm clip for stability
     p.add_argument("--max-history", type=int, default=50)
     p.add_argument("--output-dims", type=int, default=128)
     args = p.parse_args()
 
-    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
+    print(f"device: {device}")
     data = build_training_data(args.max_history)
 
-    encoder = RestaurantEncoder(data["features"], output_dims=args.output_dims).to(device)
+    encoder = RestaurantEncoder(data["features"], output_dims=args.output_dims).to(
+        device
+    )
     hist_items = data["hist_items"].to(device)
     hist_ratings = data["hist_ratings"].to(device)
     hist_mask = data["hist_mask"].to(device)
     global_mean = data["global_mean"]
 
-    loader = DataLoader(BPRDataset(data), batch_size=args.batch_size, shuffle=True, num_workers=0)
+    loader = DataLoader(
+        BPRDataset(data), batch_size=args.batch_size, shuffle=True, num_workers=0
+    )
     opt = torch.optim.Adam(encoder.parameters(), lr=args.lr)
 
     for epoch in range(args.epochs):
@@ -181,16 +217,19 @@ def main():
             pos_emb = encoder(pos)
             neg_emb = encoder(neg)
 
-            pos_score = (user_emb * pos_emb).sum(dim=1)   # dot = cosine (all unit)
+            pos_score = (user_emb * pos_emb).sum(dim=1)  # dot = cosine (all unit)
             neg_score = (user_emb * neg_emb).sum(dim=1)
             loss = bpr_loss(pos_score, neg_score)
 
             opt.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(encoder.parameters(), max_norm=args.clip)
             opt.step()
             total += loss.item() * len(u)
 
-        print(f"epoch {epoch + 1}/{args.epochs}  bpr_loss {total / len(loader.dataset):.4f}")
+        print(
+            f"epoch {epoch + 1}/{args.epochs}  bpr_loss {total / len(loader.dataset):.4f}"
+        )
 
     torch.save(encoder.state_dict(), OUT / "encoder.pt")
     print(f"saved {OUT}/encoder.pt")
