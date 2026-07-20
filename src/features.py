@@ -31,6 +31,7 @@ learned attention.
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -38,8 +39,11 @@ import pandas as pd
 import torch
 from sentence_transformers import SentenceTransformer
 
-OUT = Path("data/processed")
-MODEL = "thenlper/gte-base"  # 512-token ctx fits 97.4% of reviews whole (MiniLM's 256 fit 83.4%)
+OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/processed"))
+# 512-token ctx fits 97.4% of reviews whole (MiniLM's 256 fit 83.4%). Swap via
+# DEEP_TASTE_SBERT to try another encoder without editing source; the chosen name
+# is recorded in norm_stats.json so features can be traced back to their model.
+MODEL = os.environ.get("DEEP_TASTE_SBERT", "thenlper/gte-base")
 
 
 def parse_tags(cats: str) -> list[str]:
