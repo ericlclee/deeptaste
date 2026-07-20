@@ -12,6 +12,7 @@ the two-stage design "effectively end-to-end".
 """
 
 import argparse
+import os
 from pathlib import Path
 
 import numpy as np
@@ -22,7 +23,9 @@ from torch.utils.data import DataLoader, Dataset
 
 from model import RestaurantEncoder
 
-OUT = Path("data/processed")
+# Default is repo-relative; DEEP_TASTE_DATA lets a scheduler point at scratch
+# without depending on the job's working directory.
+OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/processed"))
 POSITIVE_THRESHOLD = 4  # a rating >= this is a "positive" the user is said to prefer
 
 
@@ -181,7 +184,23 @@ def main():
     p.add_argument("--clip", type=float, default=1.0)  # grad-norm clip for stability
     p.add_argument("--max-history", type=int, default=50)
     p.add_argument("--output-dims", type=int, default=128)
+    p.add_argument(
+        "--checkpoint",
+        default=None,
+        help="where to write the best-val checkpoint (default: <data>/encoder.pt). "
+        "Give each run its own path when sweeping, or they overwrite each other.",
+    )
+    p.add_argument("--eval-k", type=int, default=10)  # k for the per-epoch HR/NDCG
+    p.add_argument("--eval-batch-size", type=int, default=512)
+    p.add_argument(
+        "--eval-test",
+        action="store_true",
+        help="also print test metrics each epoch. Off by default: checkpoints are "
+        "selected on val, and repeatedly reading test biases it into a second val set.",
+    )
     args = p.parse_args()
+    ckpt_path = Path(args.checkpoint) if args.checkpoint else OUT / "encoder.pt"
+    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
 
     if torch.cuda.is_available():
         device = "cuda"
@@ -205,6 +224,36 @@ def main():
     )
     opt = torch.optim.Adam(encoder.parameters(), lr=args.lr)
 
+    # Imported here, not at module scope: evaluate.py imports from train.py, so a
+    # top-level import would be circular.
+    from evaluate import index_reviews, build_seen, eval_pairs, rank_heldout, hr_at_k, ndcg_at_k
+
+    n_rest = data["n_restaurants"]
+    reviews = index_reviews(data["user_to_idx"], data["biz_to_idx"])
+
+    # Val: rank the held-out val item against everything except the train history.
+    # (Excluding val from the candidate set would remove the very item we score.)
+    val_seen = build_seen(reviews, data["n_users"], n_rest, ["train"])
+    val_users, val_items = eval_pairs(reviews, "val")
+    print(f"val: {len(val_users):,} users with a held-out positive")
+
+    test_seen = test_users = test_items = None
+    if args.eval_test:
+        test_seen = build_seen(reviews, data["n_users"], n_rest, ["train", "val"])
+        test_users, test_items = eval_pairs(reviews, "test")
+        print(
+            f"test: {len(test_users):,} users -- REPORTED ONLY, not used for checkpoint "
+            "selection. Tuning against these numbers biases them."
+        )
+
+    def eval_ndcg(users, items, seen):
+        ranks = rank_heldout(
+            encoder, users, items, seen, hist_items, hist_ratings, hist_mask,
+            global_mean, n_rest, device, args.eval_batch_size,
+        )
+        return hr_at_k(ranks, args.eval_k), ndcg_at_k(ranks, args.eval_k)
+
+    best_ndcg, best_epoch = -1.0, 0
     for epoch in range(args.epochs):
         encoder.train()
         total = 0.0
@@ -227,12 +276,30 @@ def main():
             opt.step()
             total += loss.item() * len(u)
 
-        print(
+        # Train loss is a tripwire (NaN / divergence / flatline), not a progress
+        # metric: its scale depends on the negative sampler, so it is not comparable
+        # across configs. Val NDCG is what selects the checkpoint.
+        line = (
             f"epoch {epoch + 1}/{args.epochs}  bpr_loss {total / len(loader.dataset):.4f}"
         )
 
-    torch.save(encoder.state_dict(), OUT / "encoder.pt")
-    print(f"saved {OUT}/encoder.pt")
+        val_hr, val_ndcg = eval_ndcg(val_users, val_items, val_seen)
+        line += f"  |  val HR@{args.eval_k} {val_hr:.4f}  NDCG@{args.eval_k} {val_ndcg:.4f}"
+
+        if args.eval_test:
+            test_hr, test_ndcg = eval_ndcg(test_users, test_items, test_seen)
+            line += f"  |  test HR@{args.eval_k} {test_hr:.4f}  NDCG@{args.eval_k} {test_ndcg:.4f}"
+
+        if val_ndcg > best_ndcg:
+            best_ndcg, best_epoch = val_ndcg, epoch + 1
+            torch.save(encoder.state_dict(), ckpt_path)
+            line += "  *best"
+        print(line)
+
+    print(
+        f"\nsaved {ckpt_path} from epoch {best_epoch} "
+        f"(best val NDCG@{args.eval_k} {best_ndcg:.4f})"
+    )
 
 
 if __name__ == "__main__":
