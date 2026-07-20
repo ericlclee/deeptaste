@@ -4,6 +4,5 @@ __pycache__/
 .DS_Store
 *.pt
 .streamlit/
-colab_upload/
 logs/
 runs/
