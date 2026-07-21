@@ -8,14 +8,20 @@
 # "driver is too old" warning. Installing torch first from a pinned CUDA index
 # means the later installs see the requirement already satisfied and leave it be.
 #
-# CUDA_CHANNEL must be <= the driver's CUDA version. Check the driver with
-# `nvidia-smi` on a GPU node; cu128 works on any 12.x driver from 12.8 up, and
-# CUDA minor-version compatibility covers the rest of the 12.x line.
-#     CUDA_CHANNEL=cu126 bash scripts/setup_env.sh   # for an older driver
+# CUDA_CHANNEL must be <= the driver's CUDA version; CUDA minor-version
+# compatibility covers the rest of the 12.x line either way. Default is cu126,
+# NOT the newest channel -- PACE-ICE's GPU nodes are Tesla V100s (compute
+# capability 7.0 / Volta), and PyTorch's cu128/cu129 wheels dropped Volta
+# kernels to move to a cuDNN version incompatible with CC 7.0. Installing from
+# cu128 still reports torch.cuda.is_available() == True (that only checks
+# driver connectivity), so the mismatch doesn't surface until a real kernel
+# launch fails mid-training with "no kernel image is available for execution
+# on the device". Only raise this if PACE-ICE's GPU nodes stop being V100s.
+#     CUDA_CHANNEL=cu128 bash scripts/setup_env.sh   # only for CC>=7.5 GPUs
 set -euo pipefail
 
 ENV_NAME="${ENV_NAME:-deeptaste}"
-CUDA_CHANNEL="${CUDA_CHANNEL:-cu128}"
+CUDA_CHANNEL="${CUDA_CHANNEL:-cu126}"
 
 module load anaconda3
 
