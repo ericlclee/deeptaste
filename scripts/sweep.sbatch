@@ -41,7 +41,7 @@ cd "${SLURM_SUBMIT_DIR:-$(pwd)}"
 mkdir -p "${RUN_DIR}" logs
 
 module load anaconda3
-source activate "${ENV_NAME:-deep_taste}"
+source activate "${ENV_NAME:-deeptaste}"
 
 export PYTHONPATH="${PWD}/src:${PYTHONPATH:-}"
 export DEEP_TASTE_DATA="${DEEP_TASTE_DATA:-${PWD}/data/processed}"

@@ -5,7 +5,7 @@
 # against CUDA 13 and fails on PACE's CUDA 12.9 driver. So torch is installed
 # first, from a pinned CUDA index, and the rest afterwards -- see
 # scripts/setup_env.sh. Do not add torch-dependent packages to this file.
-name: deep_taste
+name: deeptaste
 channels:
   - conda-forge
 dependencies:

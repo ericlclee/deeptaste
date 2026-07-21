@@ -14,7 +14,7 @@
 #     CUDA_CHANNEL=cu126 bash scripts/setup_env.sh   # for an older driver
 set -euo pipefail
 
-ENV_NAME="${ENV_NAME:-deep_taste}"
+ENV_NAME="${ENV_NAME:-deeptaste}"
 CUDA_CHANNEL="${CUDA_CHANNEL:-cu128}"
 
 module load anaconda3

@@ -28,7 +28,7 @@
 #     FP16=0 sbatch -p <partition> scripts/features.sbatch    # disable half precision
 set -euo pipefail
 
-ENV_NAME="${ENV_NAME:-deep_taste}"
+ENV_NAME="${ENV_NAME:-deeptaste}"
 
 TAU="${TAU:-2.0}"                  # recency half-life in years
 BATCH_SIZE="${BATCH_SIZE:-128}"    # 128 fits a T4 at 512 tokens; raise on bigger cards

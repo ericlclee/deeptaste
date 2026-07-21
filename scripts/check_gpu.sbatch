@@ -19,7 +19,7 @@ set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$(pwd)}"
 mkdir -p logs
 module load anaconda3
-source activate "${ENV_NAME:-deep_taste}"
+source activate "${ENV_NAME:-deeptaste}"
 
 nvidia-smi
 

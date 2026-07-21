@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=deep_taste
+#SBATCH --job-name=deeptaste
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
@@ -23,7 +23,7 @@
 #     EPOCHS=40 LR=1e-4 BATCH_SIZE=4096 sbatch scripts/train.sbatch
 set -euo pipefail
 
-ENV_NAME="${ENV_NAME:-deep_taste}"
+ENV_NAME="${ENV_NAME:-deeptaste}"
 
 EPOCHS="${EPOCHS:-20}"
 BATCH_SIZE="${BATCH_SIZE:-2048}"
