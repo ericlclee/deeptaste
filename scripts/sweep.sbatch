@@ -52,7 +52,17 @@ echo "array task ${IDX}: ${RUN_NAME}"
 echo "checkpoint : ${RUN_DIR}/encoder.pt"
 echo "=========================================================="
 
-srun python src/train.py \
+# Fail fast if torch cannot see the GPU. Without this the job silently runs on
+# CPU and dies at the time limit hours later (see the CUDA-build mismatch note
+# in scripts/setup_env.sh).
+python -c "
+import sys, torch
+if not torch.cuda.is_available():
+    sys.exit('FATAL: no GPU visible to torch (built for CUDA %s). '
+             'Run scripts/check_gpu.sbatch to diagnose.' % torch.version.cuda)
+"
+
+python src/train.py \
     --epochs "${EPOCHS:-20}" \
     --batch-size "${BATCH_SIZE}" \
     --lr "${LR}" \

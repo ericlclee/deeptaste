@@ -1,17 +1,13 @@
+# Deliberately minimal: only the interpreter and pip.
+#
+# Every package here that depends on torch (sentence-transformers, transformers)
+# would otherwise pull the DEFAULT PyPI torch wheel, which is currently built
+# against CUDA 13 and fails on PACE's CUDA 12.9 driver. So torch is installed
+# first, from a pinned CUDA index, and the rest afterwards -- see
+# scripts/setup_env.sh. Do not add torch-dependent packages to this file.
 name: deep_taste
 channels:
-  - pytorch
-  - nvidia
   - conda-forge
 dependencies:
   - python=3.12
   - pip
-  - pip:
-      # torch is installed separately in the cluster bootstrap so the CUDA build
-      # matches PACE's driver -- see scripts/setup_env.sh.
-      - pandas==3.0.3
-      - pyarrow==24.0.0
-      - numpy==2.5.1
-      - scikit-learn==1.9.0
-      - sentence-transformers==5.6.0
-      - transformers==5.14.0
