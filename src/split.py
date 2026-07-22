@@ -13,11 +13,12 @@ they now like (or vice versa).
 """
 
 import argparse
+import os
 from pathlib import Path
 
 import pandas as pd
 
-OUT = Path("data/processed")
+OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/processed"))
 
 
 def main():

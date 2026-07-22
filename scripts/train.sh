@@ -34,6 +34,7 @@ EVAL_K="${EVAL_K:-10}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-512}"
 HARD_NEG_RATIO="${HARD_NEG_RATIO:-0.0}"   # fraction of negatives from the pos's cuisine/price/geo cluster
 HARD_NEG_K="${HARD_NEG_K:-30}"
+RATED_NEG_RATIO="${RATED_NEG_RATIO:-1.0}"   # fraction of negatives from this user's own below-threshold reviews
 EXTRA_ARGS="${EXTRA_ARGS:-}"   # e.g. EXTRA_ARGS=--eval-test
 
 # Slurm starts the job in the submit directory; be explicit anyway so the job is
@@ -77,6 +78,7 @@ python src/train.py \
     --eval-batch-size "${EVAL_BATCH_SIZE}" \
     --hard-neg-ratio "${HARD_NEG_RATIO}" \
     --hard-neg-k "${HARD_NEG_K}" \
+    --rated-neg-ratio "${RATED_NEG_RATIO}" \
     ${EXTRA_ARGS}
 
 echo "training done -- checkpoint written to ${DEEP_TASTE_DATA}/encoder.pt"

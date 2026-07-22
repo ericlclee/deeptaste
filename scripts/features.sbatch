@@ -19,7 +19,7 @@
 #     mkdir -p logs
 #     sbatch -p <partition> scripts/features.sbatch
 #
-# Partition is intentionally unset -- see the note in scripts/train.sbatch.
+# Partition is intentionally unset -- see the note in scripts/train.sh.
 # #SBATCH --partition=ice-gpu
 #
 # Overrides:
