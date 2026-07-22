@@ -179,13 +179,14 @@ def main():
     tag_count_z, t_mu, t_sd = zscore(np.array([len(t) for t in tag_lists], dtype=np.float32))
 
     # rating_std: within-restaurant disagreement, from TRAIN reviews only (same
-    # leakage boundary as text_emb above). A restaurant with a single train
-    # review has an undefined std -- 0 is the correct value (no observed
-    # variance), not an imputed population mean.
-    rating_std_raw = (
-        train.groupby("business_id").stars.std().reindex(biz.business_id).fillna(0.0)
-        .to_numpy(dtype=np.float32)
-    )
+    # leakage boundary as text_emb above). A restaurant with <2 train reviews
+    # has an undefined std -- fill with the population median (neutral), not 0,
+    # which would falsely assert "perfectly consistent" for a restaurant we
+    # simply have no variance evidence for.
+    rating_std_raw = train.groupby("business_id").stars.std().reindex(biz.business_id)
+    n_missing_std = int(rating_std_raw.isna().sum())
+    rating_std_raw = rating_std_raw.fillna(rating_std_raw.median()).to_numpy(dtype=np.float32)
+    print(f"rating_std: {n_missing_std} restaurants median-filled (fewer than 2 train reviews)")
     rating_std_z, rs_mu, rs_sd = zscore(rating_std_raw)
 
     lat = biz.latitude.to_numpy(dtype=np.float32)

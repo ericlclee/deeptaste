@@ -132,26 +132,46 @@ def build_hard_candidates(feats: dict, k: int = 30) -> list[np.ndarray]:
 
 
 class BPRDataset(Dataset):
-    """One example = (user_idx, positive_idx, negative_idx).
+    """One example = (user_idx, positive_idx, negative_idx). Three negative
+    sources, tried in priority order:
 
-    With probability `hard_neg_ratio`, the negative is drawn from
-    `hard_candidates[pos]` -- restaurants that look like the positive (same
-    price tier, nearby, sharing a cuisine tag) but weren't chosen. Random
-    negatives are trivially distinguishable (wrong cuisine, wrong side of
-    town), so the model can satisfy BPR on them without learning much; hard
-    negatives force the finer-grained distinctions the spec calls for.
-    Falls back to a uniform random negative whenever the hard pool is empty,
-    already-seen, or (with probability `1 - hard_neg_ratio`) not selected."""
+    1. Rated negative: a restaurant THIS user rated below POSITIVE_THRESHOLD
+       (used with probability `rated_neg_ratio` when the user has any -- a
+       below-4-star review, including a "meh" 3-star one, is real personal
+       dislike, and BPR never otherwise gets to contrast it against something
+       the user liked: it's excluded from the candidate set at eval time and
+       (until now) from negative sampling too, so its only effect was a mild
+       pull on the aggregated user_emb).
+    2. Hard negative: with probability `hard_neg_ratio`, drawn from
+       `hard_candidates[pos]` -- restaurants that look like the positive (same
+       price tier, nearby, sharing a cuisine tag) but weren't chosen. Random
+       negatives are trivially distinguishable (wrong cuisine, wrong side of
+       town), so the model can satisfy BPR on them without learning much.
+    3. Uniform random negative: the fallback whenever 1-2 don't apply or their
+       pool is empty/already-seen.
+    """
 
-    def __init__(self, data: dict, hard_neg_ratio: float = 0.0, hard_neg_k: int = 30):
+    def __init__(
+        self,
+        data: dict,
+        hard_neg_ratio: float = 0.0,
+        hard_neg_k: int = 30,
+        rated_neg_ratio: float = 1.0,
+    ):
         self.positives = data["positives"]
         self.n_restaurants = data["n_restaurants"]
         self.hard_neg_ratio = hard_neg_ratio
+        self.rated_neg_ratio = rated_neg_ratio
         # set of interacted items per user, for negative rejection
         self.seen = [set() for _ in range(data["n_users"])]
-        items, mask = data["hist_items"], data["hist_mask"]
+        # subset of the above this user rated < POSITIVE_THRESHOLD (explicit
+        # dislikes), for rated-negative sampling
+        self.rated_neg = [None] * data["n_users"]
+        items, ratings, mask = data["hist_items"], data["hist_ratings"], data["hist_mask"]
         for u in range(data["n_users"]):
             self.seen[u] = set(items[u][mask[u]].tolist())
+            disliked_mask = mask[u] & (ratings[u] < POSITIVE_THRESHOLD)
+            self.rated_neg[u] = items[u][disliked_mask].numpy()
 
         self.hard_candidates = (
             build_hard_candidates(data["features"], k=hard_neg_k)
@@ -170,6 +190,13 @@ class BPRDataset(Dataset):
 
     def __getitem__(self, i):
         u, pos = self.positives[i]
+        if np.random.rand() < self.rated_neg_ratio:
+            # exclude pos itself: a repeat visitor can rate the SAME restaurant
+            # both >=POSITIVE_THRESHOLD (today's positive) and below it (a
+            # different visit), which would otherwise let pos == neg through.
+            candidates = self.rated_neg[u][self.rated_neg[u] != pos]
+            if len(candidates) > 0:
+                return u, pos, int(np.random.choice(candidates))
         seen = self.seen[u]
         if self.hard_candidates is not None and np.random.rand() < self.hard_neg_ratio:
             for j in np.random.permutation(self.hard_candidates[pos]):
@@ -271,6 +298,14 @@ def main():
         help="candidate pool size per restaurant for hard-negative sampling",
     )
     p.add_argument(
+        "--rated-neg-ratio",
+        type=float,
+        default=1.0,
+        help="probability of using a restaurant this user rated below "
+        "POSITIVE_THRESHOLD as the negative, when they have one (highest-"
+        "priority negative source, tried before hard/random); 0 disables it",
+    )
+    p.add_argument(
         "--eval-test",
         action="store_true",
         help="also print test metrics each epoch. Off by default: checkpoints are "
@@ -297,9 +332,17 @@ def main():
     hist_mask = data["hist_mask"].to(device)
     global_mean = data["global_mean"]
 
-    print(f"hard-neg ratio: {args.hard_neg_ratio} (k={args.hard_neg_k})")
+    print(
+        f"hard-neg ratio: {args.hard_neg_ratio} (k={args.hard_neg_k})  |  "
+        f"rated-neg ratio: {args.rated_neg_ratio}"
+    )
     loader = DataLoader(
-        BPRDataset(data, hard_neg_ratio=args.hard_neg_ratio, hard_neg_k=args.hard_neg_k),
+        BPRDataset(
+            data,
+            hard_neg_ratio=args.hard_neg_ratio,
+            hard_neg_k=args.hard_neg_k,
+            rated_neg_ratio=args.rated_neg_ratio,
+        ),
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=0,

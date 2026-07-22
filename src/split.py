@@ -2,6 +2,14 @@
 
 Must run before features.py. Restaurant text embeddings are built from training
 reviews only, so the split boundary has to exist before any text is encoded.
+
+Repeat visits are collapsed to the user's LATEST review of that restaurant before
+anything else happens (~4% of (user, restaurant) pairs, ~8% of all reviews --
+not a rare edge case). An outdated review would otherwise sit alongside the
+current one everywhere downstream: double-counted (or outright contradicted) in
+the profile aggregation, redundant/stale in the BPR positive set, and eligible
+as a "disliked" rated-negative for a restaurant the user's later review says
+they now like (or vice versa).
 """
 
 import argparse
@@ -20,6 +28,16 @@ def main():
 
     reviews = pd.read_parquet(OUT / "reviews.parquet")
     reviews["date"] = pd.to_datetime(reviews["date"])
+
+    n_before = len(reviews)
+    reviews = reviews.sort_values(["user_id", "business_id", "date"], kind="stable")
+    reviews = reviews.drop_duplicates(subset=["user_id", "business_id"], keep="last")
+    n_dropped = n_before - len(reviews)
+    print(
+        f"dropped {n_dropped:,} stale repeat-visit reviews "
+        f"({n_dropped / n_before * 100:.2f}%), keeping each user's latest review per restaurant"
+    )
+
     reviews = reviews.sort_values(["user_id", "date"], kind="stable")
 
     # 0 = most recent review for that user
