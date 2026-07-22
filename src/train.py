@@ -90,29 +90,93 @@ def build_training_data(max_history: int):
     }
 
 
-class BPRDataset(Dataset):
-    """One example = (user_idx, positive_idx, negative_idx). Negatives are sampled
-    uniformly from restaurants the user has not interacted with (false-negative
-    rate ~0.1% at this catalog size, per the earlier analysis)."""
+def build_hard_candidates(feats: dict, k: int = 30) -> list[np.ndarray]:
+    """For each restaurant, up to `k` OTHER restaurants that share a price tier
+    and at least one cuisine tag, restricted to its geographic neighborhood --
+    the "same cuisine/price/geo cluster" hard-negative pool from the project
+    spec. A restaurant with too few same-tag-and-price geo-neighbors (rare
+    tags, missing price) falls back to geo+price, then to geo alone, so every
+    restaurant still gets a same-*area* pool even if cuisine/price can't be
+    matched.
+    """
+    from sklearn.neighbors import NearestNeighbors
 
-    def __init__(self, data: dict):
+    latlng = feats["latlng"].numpy()
+    price = feats["price"].numpy()
+    price_mask = feats["price_mask"].numpy()
+    tag_ids = feats["tag_ids"].numpy()  # (n, t_max), 0 = padding
+    n = latlng.shape[0]
+
+    # Wide geo pool (k*4) so the tag/price filters below have enough to work
+    # with; +1 because a restaurant is always its own nearest neighbor.
+    nn = NearestNeighbors(n_neighbors=min(k * 4 + 1, n)).fit(latlng)
+    _, geo_idx = nn.kneighbors(latlng)
+
+    tag_sets = [set(row[row > 0].tolist()) for row in tag_ids]
+
+    def same_price(i, j):
+        return not price_mask[i] or not price_mask[j] or price[i] == price[j]
+
+    candidates = []
+    for i in range(n):
+        neighbors = geo_idx[i][geo_idx[i] != i]
+
+        pool = [j for j in neighbors if tag_sets[j] & tag_sets[i] and same_price(i, j)]
+        if len(pool) < 5:
+            pool = [j for j in neighbors if same_price(i, j)]
+        if len(pool) < 5:
+            pool = neighbors.tolist()
+
+        candidates.append(np.array(pool[:k], dtype=np.int64))
+    return candidates
+
+
+class BPRDataset(Dataset):
+    """One example = (user_idx, positive_idx, negative_idx).
+
+    With probability `hard_neg_ratio`, the negative is drawn from
+    `hard_candidates[pos]` -- restaurants that look like the positive (same
+    price tier, nearby, sharing a cuisine tag) but weren't chosen. Random
+    negatives are trivially distinguishable (wrong cuisine, wrong side of
+    town), so the model can satisfy BPR on them without learning much; hard
+    negatives force the finer-grained distinctions the spec calls for.
+    Falls back to a uniform random negative whenever the hard pool is empty,
+    already-seen, or (with probability `1 - hard_neg_ratio`) not selected."""
+
+    def __init__(self, data: dict, hard_neg_ratio: float = 0.0, hard_neg_k: int = 30):
         self.positives = data["positives"]
         self.n_restaurants = data["n_restaurants"]
+        self.hard_neg_ratio = hard_neg_ratio
         # set of interacted items per user, for negative rejection
         self.seen = [set() for _ in range(data["n_users"])]
         items, mask = data["hist_items"], data["hist_mask"]
         for u in range(data["n_users"]):
             self.seen[u] = set(items[u][mask[u]].tolist())
 
+        self.hard_candidates = (
+            build_hard_candidates(data["features"], k=hard_neg_k)
+            if hard_neg_ratio > 0
+            else None
+        )
+
     def __len__(self):
         return len(self.positives)
 
+    def _random_negative(self, seen: set) -> int:
+        j = np.random.randint(self.n_restaurants)
+        while j in seen:
+            j = np.random.randint(self.n_restaurants)
+        return j
+
     def __getitem__(self, i):
         u, pos = self.positives[i]
-        j = np.random.randint(self.n_restaurants)
-        while j in self.seen[u]:
-            j = np.random.randint(self.n_restaurants)
-        return u, pos, j
+        seen = self.seen[u]
+        if self.hard_candidates is not None and np.random.rand() < self.hard_neg_ratio:
+            for j in np.random.permutation(self.hard_candidates[pos]):
+                if j != pos and j not in seen:
+                    return u, pos, int(j)
+            # pool empty or fully seen -- fall through to a random negative
+        return u, pos, self._random_negative(seen)
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +257,20 @@ def main():
     p.add_argument("--eval-k", type=int, default=10)  # k for the per-epoch HR/NDCG
     p.add_argument("--eval-batch-size", type=int, default=512)
     p.add_argument(
+        "--hard-neg-ratio",
+        type=float,
+        default=0.0,
+        help="fraction of negatives drawn from the positive's cuisine/price/geo "
+        "cluster instead of uniformly at random (0 = pure random, the original "
+        "behavior; try 0.5 as a starting point)",
+    )
+    p.add_argument(
+        "--hard-neg-k",
+        type=int,
+        default=30,
+        help="candidate pool size per restaurant for hard-negative sampling",
+    )
+    p.add_argument(
         "--eval-test",
         action="store_true",
         help="also print test metrics each epoch. Off by default: checkpoints are "
@@ -219,8 +297,12 @@ def main():
     hist_mask = data["hist_mask"].to(device)
     global_mean = data["global_mean"]
 
+    print(f"hard-neg ratio: {args.hard_neg_ratio} (k={args.hard_neg_k})")
     loader = DataLoader(
-        BPRDataset(data), batch_size=args.batch_size, shuffle=True, num_workers=0
+        BPRDataset(data, hard_neg_ratio=args.hard_neg_ratio, hard_neg_k=args.hard_neg_k),
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=0,
     )
     opt = torch.optim.Adam(encoder.parameters(), lr=args.lr)
 

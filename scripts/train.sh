@@ -11,15 +11,15 @@
 # PARTITION: not set above on purpose -- PACE-ICE partition names change between
 # semesters and a wrong one fails at submit time with a confusing message. Check
 # yours with `sinfo -s` on a login node, then either uncomment the line below or
-# pass it at submit: sbatch -p <partition> scripts/train.sbatch
+# pass it at submit: sbatch -p <partition> scripts/train.sh
 # #SBATCH --partition=ice-gpu
 #
 # Submit from the repo root:
 #     mkdir -p logs
-#     sbatch scripts/train.sbatch
+#     sbatch scripts/train.sh
 #
 # Override any hyperparameter via the environment:
-#     EPOCHS=40 LR=1e-4 BATCH_SIZE=4096 sbatch scripts/train.sbatch
+#     EPOCHS=40 LR=1e-4 BATCH_SIZE=4096 sbatch scripts/train.sh
 set -euo pipefail
 
 ENV_NAME="${ENV_NAME:-deeptaste}"
@@ -32,6 +32,8 @@ MAX_HISTORY="${MAX_HISTORY:-50}"
 OUTPUT_DIMS="${OUTPUT_DIMS:-128}"
 EVAL_K="${EVAL_K:-10}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-512}"
+HARD_NEG_RATIO="${HARD_NEG_RATIO:-0.0}"   # fraction of negatives from the pos's cuisine/price/geo cluster
+HARD_NEG_K="${HARD_NEG_K:-30}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"   # e.g. EXTRA_ARGS=--eval-test
 
 # Slurm starts the job in the submit directory; be explicit anyway so the job is
@@ -73,6 +75,8 @@ python src/train.py \
     --output-dims "${OUTPUT_DIMS}" \
     --eval-k "${EVAL_K}" \
     --eval-batch-size "${EVAL_BATCH_SIZE}" \
+    --hard-neg-ratio "${HARD_NEG_RATIO}" \
+    --hard-neg-k "${HARD_NEG_K}" \
     ${EXTRA_ARGS}
 
 echo "training done -- checkpoint written to ${DEEP_TASTE_DATA}/encoder.pt"

@@ -11,9 +11,13 @@ what sources provide, not everything Yelp happens to offer:
     n_reviews     int         log1p then z-scored, per-source stats
     review_texts  list[str]   pooled with exponential recency weights
 
-Deliberately excluded: Yelp's 5-star rating histogram. Google Places does not
-expose a rating distribution, and a model that leans on it cannot serve Google
-data at all.
+Exception to the source-agnostic rule: rating_std (per-restaurant std-dev of
+individual review stars, computed from train reviews only -- see "numerics"
+below). Google Places doesn't expose a rating distribution, so this is a
+Yelp-only signal for now; per the project spec Google enrichment is an
+optional later phase, so this is an accepted tradeoff, not an oversight. If
+Google Places support is ever added, this column needs a fallback (impute
+the population mean, or drop the column) for restaurants from that source.
 
 Tags are encoded by running the tag *name* through the sentence encoder rather
 than a learned nn.Embedding, so an unseen vocabulary ("chinese_restaurant")
@@ -38,6 +42,7 @@ import numpy as np
 import pandas as pd
 import torch
 from sentence_transformers import SentenceTransformer
+from sklearn.cluster import KMeans
 
 OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/processed"))
 # 512-token ctx fits 97.4% of reviews whole (MiniLM's 256 fit 83.4%). Swap via
@@ -65,6 +70,13 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--tau", type=float, default=2.0, help="recency half-life in years")
     p.add_argument("--batch-size", type=int, default=64)
+    p.add_argument(
+        "--n-geo-clusters",
+        type=int,
+        default=25,
+        help="KMeans neighborhood clusters over restaurant lat/lng, for the "
+        "dist_cluster/log_cluster_size geo features",
+    )
     p.add_argument("--data-dir", default=str(OUT))
     p.add_argument("--fp16", action="store_true", help="half precision; ~2x on CUDA, unsupported on MPS")
     args = p.parse_args()
@@ -101,6 +113,13 @@ def main():
 
     tag_vecs = np.zeros((len(vocab) + 1, dim), dtype=np.float32)
     tag_vecs[1:] = sbert.encode(vocab, batch_size=args.batch_size, show_progress_bar=True)
+
+    # ---- name: same encoder as tags/reviews, one vector per restaurant name --
+    # gives the encoder a name-based prior (e.g. "Taco" in the name) independent
+    # of the categories Yelp assigned it.
+    name_emb = sbert.encode(
+        list(biz.name), batch_size=args.batch_size, show_progress_bar=True, convert_to_numpy=True
+    ).astype(np.float32)
 
     t_max = max((len(t) for t in tag_lists), default=1)
     tag_ids = np.zeros((n, t_max), dtype=np.int64)
@@ -158,18 +177,57 @@ def main():
     rating_z, r_mu, r_sd = zscore(biz.stars.to_numpy(dtype=np.float32))
     count_z, c_mu, c_sd = zscore(np.log1p(biz.review_count.to_numpy(dtype=np.float32)))
     tag_count_z, t_mu, t_sd = zscore(np.array([len(t) for t in tag_lists], dtype=np.float32))
+
+    # rating_std: within-restaurant disagreement, from TRAIN reviews only (same
+    # leakage boundary as text_emb above). A restaurant with a single train
+    # review has an undefined std -- 0 is the correct value (no observed
+    # variance), not an imputed population mean.
+    rating_std_raw = (
+        train.groupby("business_id").stars.std().reindex(biz.business_id).fillna(0.0)
+        .to_numpy(dtype=np.float32)
+    )
+    rating_std_z, rs_mu, rs_sd = zscore(rating_std_raw)
+
     lat = biz.latitude.to_numpy(dtype=np.float32)
     lng = biz.longitude.to_numpy(dtype=np.float32)
     lat_z, lat_mu, lat_sd = zscore(lat)
     lng_z, lng_mu, lng_sd = zscore(lng)
+
+    # ---- geo clusters: cheap "which neighborhood" signal on top of raw lat/lng.
+    # KMeans on a single metro's coordinates (prepare_data.py already filters to
+    # one city) -- plain Euclidean in degree-space, not haversine, consistent
+    # with lat/lng elsewhere in this file; fine at metro scale.
+    latlng_raw = np.stack([lat, lng], 1)
+    kmeans = KMeans(n_clusters=args.n_geo_clusters, random_state=0, n_init=10)
+    cluster_id = kmeans.fit_predict(latlng_raw)
+    centers = kmeans.cluster_centers_
+
+    city_center = latlng_raw.mean(axis=0)
+    dist_center = np.linalg.norm(latlng_raw - city_center, axis=1).astype(np.float32)
+    dist_cluster = np.linalg.norm(latlng_raw - centers[cluster_id], axis=1).astype(np.float32)
+    cluster_counts = np.bincount(cluster_id, minlength=args.n_geo_clusters)
+    log_cluster_size = np.log1p(cluster_counts[cluster_id]).astype(np.float32)
+
+    dist_center_z, dc_mu, dc_sd = zscore(dist_center)
+    dist_cluster_z, dk_mu, dk_sd = zscore(dist_cluster)
+    log_cluster_size_z, ls_mu, ls_sd = zscore(log_cluster_size)
 
     stats = {
         "source": "yelp",
         "rating": [r_mu, r_sd],
         "log_review_count": [c_mu, c_sd],
         "tag_count": [t_mu, t_sd],
+        "rating_std": [rs_mu, rs_sd],
         "lat": [lat_mu, lat_sd],
         "lng": [lng_mu, lng_sd],
+        "dist_center": [dc_mu, dc_sd],
+        "dist_cluster": [dk_mu, dk_sd],
+        "log_cluster_size": [ls_mu, ls_sd],
+        "n_geo_clusters": args.n_geo_clusters,
+        "city_center": city_center.tolist(),
+        # cluster centers, so a new restaurant at serve time is assigned to the
+        # nearest existing cluster rather than refitting KMeans on one point.
+        "geo_cluster_centers": centers.tolist(),
         "recency_tau_years": args.tau,
         "reference_date": str(now.date()),
         "sbert_model": MODEL,
@@ -185,10 +243,15 @@ def main():
             "tag_ids": torch.from_numpy(tag_ids),
             "tag_mask": torch.from_numpy(tag_mask),
             "text_emb": torch.from_numpy(text_emb),
+            "name_emb": torch.from_numpy(name_emb),
             "price": torch.from_numpy(price),
             "price_mask": torch.from_numpy(price_mask),
-            "numeric": torch.from_numpy(np.stack([rating_z, count_z, tag_count_z], 1)),
-            "geo": torch.from_numpy(np.stack([lat_z, lng_z], 1)),
+            "numeric": torch.from_numpy(
+                np.stack([rating_z, count_z, tag_count_z, rating_std_z], 1)
+            ),
+            "geo": torch.from_numpy(
+                np.stack([lat_z, lng_z, dist_center_z, dist_cluster_z, log_cluster_size_z], 1)
+            ),
             "latlng": torch.from_numpy(np.stack([lat, lng], 1)),
         },
         OUT / "features.pt",
