@@ -155,18 +155,6 @@ def main():
     print(f"pooled with tau={args.tau}y | effective depth (sum w): median {np.median(den.numpy()):.1f}")
     print(f"text embeddings: {text_emb.shape} | {n_missing} imputed (no train reviews)")
 
-    # per-review archive for the learned-attention upgrade
-    torch.save(
-        {
-            "review_vecs": torch.from_numpy(vecs).half(),
-            "business_idx": O.to(torch.int32),
-            "age_years": torch.from_numpy(age_years),
-            "stars": torch.from_numpy(train.stars.to_numpy(dtype=np.float32)),
-            "user_id": list(train.user_id),
-        },
-        OUT / "review_vecs.pt",
-    )
-
     # ---- price
     price_raw = pd.to_numeric(biz.price, errors="coerce").to_numpy(dtype=np.float32)
     price_mask = ~np.isnan(price_raw)
@@ -258,7 +246,7 @@ def main():
         OUT / "features.pt",
     )
     (OUT / "norm_stats.json").write_text(json.dumps(stats, indent=2))
-    print(f"wrote {OUT}/features.pt, {OUT}/review_vecs.pt, {OUT}/norm_stats.json")
+    print(f"wrote {OUT}/features.pt, {OUT}/norm_stats.json")
 
 
 if __name__ == "__main__":
