@@ -1,20 +1,27 @@
 #!/bin/bash
+#SBATCH --job-name=dt_absa
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=4
+#SBATCH --gres=gpu:V100:1
+#SBATCH --mem=16G
+#SBATCH --time=02:00:00
+#SBATCH --output=logs/%x-%j.out
+#SBATCH --error=logs/%x-%j.err
+#
 # Run the ABSA review-scoring pipeline (src/absa_tag_reviews.py) on a
-# PACE-ICE GPU node.
+# PACE-ICE GPU node. Runs a small smoke test first and aborts before the
+# full job if that fails, since a bad environment should surface in
+# seconds, not after an hour into the real run.
 #
-# Plain script, not an sbatch job -- meant for an interactive allocation
-# rather than a queued/unattended run:
+# Submit from the repo root, passing the partition explicitly (name changes
+# between semesters -- check yours with `sinfo -s`):
 #
-#     srun --partition=ice-gpu --gres=gpu:V100:1 --mem=16G --time=02:00:00 \
-#         scripts/run_absa.sh
-#
-# (swap the partition if `ice-gpu` isn't valid this semester -- check with
-# `sinfo -s`). Runs a small smoke test first and aborts before the full job
-# if that fails, since a bad environment should surface in seconds, not
-# after an hour into the real run.
+#     mkdir -p logs
+#     sbatch -p ice-gpu scripts/run_absa.sh
 #
 # Override via the environment, e.g.:
-#     LIMIT=100 scripts/run_absa.sh
+#     sbatch -p ice-gpu --export=LIMIT=100 scripts/run_absa.sh
 set -euo pipefail
 
 ENV_NAME="${ENV_NAME:-deeptaste}"
