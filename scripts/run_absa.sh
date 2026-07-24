@@ -10,22 +10,24 @@
 #SBATCH --error=logs/%x-%j.err
 #
 # Run the ABSA review-scoring pipeline (src/absa_tag_reviews.py) on a
-# PACE-ICE GPU node. Runs a small smoke test first and aborts before the
-# full job if that fails, since a bad environment should surface in
-# seconds, not after an hour into the real run.
-#
-# Submit from the repo root, passing the partition explicitly (name changes
-# between semesters -- check yours with `sinfo -s`):
+# PACE-ICE GPU node. LIMIT caps this job's ENTIRE review count -- there is
+# no separate always-runs-the-full-job step, so a smoke test and the real
+# run are two separate submissions, not one:
 #
 #     mkdir -p logs
-#     sbatch -p ice-gpu scripts/run_absa.sh
+#     sbatch -p ice-gpu --export=LIMIT=20 scripts/run_absa.sh   # smoke test
+#     sbatch -p ice-gpu scripts/run_absa.sh                     # full run (no LIMIT)
 #
-# Override via the environment, e.g.:
-#     sbatch -p ice-gpu --export=LIMIT=100 scripts/run_absa.sh
+# (partition name changes between semesters -- check yours with `sinfo -s`)
+#
+# The underlying script checkpoints after each aspect (food/service/price/
+# ambience) to data/processed/absa_scores.pt, so if this job hits the
+# --time limit mid-run, just resubmit the exact same command -- it picks
+# up from whichever aspects already finished instead of starting over.
 set -euo pipefail
 
 ENV_NAME="${ENV_NAME:-deeptaste}"
-LIMIT="${LIMIT:-20}"
+LIMIT="${LIMIT:-}"
 
 cd "${SLURM_SUBMIT_DIR:-$(pwd)}"
 
@@ -54,12 +56,16 @@ if not torch.cuda.is_available():
              'Run scripts/check_gpu.sbatch to diagnose.' % torch.version.cuda)
 "
 
-echo "--- smoke test (${LIMIT} reviews) ---"
-SMOKE_OUT="${DEEP_TASTE_DATA}/absa_scores_smoke.pt"
-python -u src/absa_tag_reviews.py --limit "${LIMIT}" --output "${SMOKE_OUT}"
-rm -f "${SMOKE_OUT}"
+if [ -n "${LIMIT}" ]; then
+    # Smoke tests write to their own file -- never the real absa_scores.pt --
+    # so re-running a smoke test can't clobber real checkpointed progress.
+    OUTPUT="${DEEP_TASTE_DATA}/absa_scores_smoke.pt"
+    echo "--- scoring first ${LIMIT} reviews (smoke test) -> ${OUTPUT} ---"
+    python -u src/absa_tag_reviews.py --limit "${LIMIT}" --output "${OUTPUT}"
+else
+    OUTPUT="${DEEP_TASTE_DATA}/absa_scores.pt"
+    echo "--- scoring all reviews (full run) -> ${OUTPUT} ---"
+    python -u src/absa_tag_reviews.py --output "${OUTPUT}"
+fi
 
-echo "--- smoke test passed, running full job ---"
-python -u src/absa_tag_reviews.py
-
-echo "absa_scores.pt written to ${DEEP_TASTE_DATA}"
+echo "wrote ${OUTPUT}"

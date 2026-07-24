@@ -10,9 +10,16 @@ for how the review talks about that aspect. We run every review against every
 aspect and store the full probability distribution -- thresholding into
 discrete tags is a separate downstream decision, not baked in here.
 
+Checkpointed per aspect: the output file is written after each aspect
+finishes, not just once at the end. Re-running with the same --output
+path skips any aspect already present in that file, so a walltime kill
+partway through only loses the in-progress aspect, not everything --
+just resubmit the same command again.
+
 Usage:
     python src/absa_tag_reviews.py --limit 20          # smoke test
     python src/absa_tag_reviews.py                     # full run (all reviews x all aspects)
+    python src/absa_tag_reviews.py                     # re-run after a timeout -- resumes from checkpoint
 """
 
 import argparse
@@ -95,28 +102,46 @@ def main():
     texts = list(reviews.text)
     print(f"scoring {len(texts):,} reviews x {len(aspects)} aspects = {len(texts) * len(aspects):,} inferences")
 
-    all_scores = torch.empty(len(texts), len(aspects), model.config.num_labels)
-    for a_idx, aspect in enumerate(aspects):
-        print(f"aspect: {aspect}")
-        all_scores[:, a_idx, :] = score_aspect(
-            model, tokenizer, texts, aspect, device, args.batch_size, args.max_length
+    # Resume support: an existing checkpoint for this exact review set (same
+    # count, same labels) means we can skip aspects it already scored --
+    # a walltime kill only costs the in-progress aspect, not the whole job.
+    scored: dict[str, torch.Tensor] = {}
+    if out_path.exists():
+        prev = torch.load(out_path, weights_only=False)
+        if prev["labels"] == labels and len(prev["business_id"]) == len(texts):
+            scored = {a: prev["scores"][:, i, :] for i, a in enumerate(prev["aspects"])}
+            print(f"resuming from {out_path}: already have {sorted(scored)}")
+        else:
+            print(f"ignoring {out_path}: doesn't match this run's review set/labels, starting fresh")
+
+    def save_checkpoint():
+        done = [a for a in aspects if a in scored]
+        scores = torch.stack([scored[a] for a in done], dim=1)  # (n_reviews, n_done, n_labels)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "scores": scores.half(),
+                "labels": labels,
+                "aspects": done,
+                "business_id": list(reviews.business_id),
+                "user_id": list(reviews.user_id),
+                "stars": torch.from_numpy(reviews.stars.to_numpy(dtype="float32")),
+                "date": list(reviews.date.astype(str)),
+                "split": list(reviews.split),
+            },
+            out_path,
         )
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "scores": all_scores.half(),  # (n_reviews, n_aspects, n_labels)
-            "labels": labels,
-            "aspects": aspects,
-            "business_id": list(reviews.business_id),
-            "user_id": list(reviews.user_id),
-            "stars": torch.from_numpy(reviews.stars.to_numpy(dtype="float32")),
-            "date": list(reviews.date.astype(str)),
-            "split": list(reviews.split),
-        },
-        out_path,
-    )
-    print(f"\nwrote {out_path}  scores shape {tuple(all_scores.shape)}")
+    for aspect in aspects:
+        if aspect in scored:
+            print(f"aspect: {aspect} (already scored, skipping)")
+            continue
+        print(f"aspect: {aspect}")
+        scored[aspect] = score_aspect(model, tokenizer, texts, aspect, device, args.batch_size, args.max_length)
+        save_checkpoint()
+        print(f"  checkpointed {aspect} -> {out_path}")
+
+    print(f"\nwrote {out_path}  scores shape {tuple(torch.stack([scored[a] for a in aspects], dim=1).shape)}")
 
 
 if __name__ == "__main__":
