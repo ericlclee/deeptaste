@@ -22,7 +22,7 @@ class RestaurantEncoder(nn.Module):
     tag_vecs: torch.Tensor
     tag_ids: torch.Tensor
     tag_mask: torch.Tensor
-    text_emb: torch.Tensor
+    absa_scores: torch.Tensor
     name_emb: torch.Tensor
     price: torch.Tensor
     numeric: torch.Tensor
@@ -43,7 +43,10 @@ class RestaurantEncoder(nn.Module):
         self.register_buffer("tag_vecs", features["tag_vecs"])
         self.register_buffer("tag_ids", features["tag_ids"])  # (N, T_max) int
         self.register_buffer("tag_mask", features["tag_mask"])  # (N, T_max) bool
-        self.register_buffer("text_emb", features["text_emb"])  # (N, 768)
+        # (N, n_aspects * n_labels) -- recency-weighted food/service/price/ambience
+        # sentiment from src/absa_tag_reviews.py, flattened. Replaces the old
+        # SBERT-pooled text_emb review branch.
+        self.register_buffer("absa_scores", features["absa_scores"])
         self.register_buffer("name_emb", features["name_emb"])  # (N, 768)
         self.register_buffer(
             "price", features["price"].long()
@@ -54,21 +57,20 @@ class RestaurantEncoder(nn.Module):
         self.register_buffer(
             "geo", features["geo"]
         )  # (N, 5) z-scored: lat, lng, dist_center, dist_cluster, log_cluster_size
-        self.n_restaurants = self.text_emb.shape[0]
+        self.n_restaurants = self.absa_scores.shape[0]
         self.output_dims = output_dims
         self.branch_dims = branch_dims
         self.hidden_dims = hidden_dims
 
         # --- per-branch projections (the "don't pre-average, project then concat"
         #     principle) ---
-        # Q: name, text, and pooled-tag vectors are each (·, 768). Do they share
-        #    one projection or get three separate Linears? (Which choice lets the
-        #    model weight them independently — the reason we concatenate?)
-        # Q: what output width should each branch project to? (Anything; the
-        #    fusion MLP consumes the concatenation.)
-        sbert_dims = self.text_emb.shape[1]
+        # Q: name and pooled-tag vectors are each (·, 768); absa_scores is much
+        #    narrower (n_aspects * n_labels). Each still gets its own Linear up
+        #    to branch_dims, so the model can weight them independently rather
+        #    than pre-averaging incompatible-scale vectors together.
+        sbert_dims = self.name_emb.shape[1]
         self.name_proj = nn.Linear(sbert_dims, branch_dims)
-        self.text_proj = nn.Linear(sbert_dims, branch_dims)
+        self.absa_proj = nn.Linear(self.absa_scores.shape[1], branch_dims)
         self.tag_proj = nn.Linear(sbert_dims, branch_dims)
 
         # --- fusion ---
@@ -82,7 +84,7 @@ class RestaurantEncoder(nn.Module):
 
         self.price_dims = int(self.price.max()) + 1  # 4 prices + no price category
         mlp_input_dims = (
-            branch_dims * 3  # tags + reviews + name
+            branch_dims * 3  # tags + absa + name
             + self.price_dims
             + self.numeric.shape[1]
             + self.geo.shape[1]
@@ -108,7 +110,7 @@ class RestaurantEncoder(nn.Module):
     def forward(self, idx: torch.Tensor) -> torch.Tensor:
         """idx: (B,) restaurant indices. Returns (B, dim) L2-normalized embeddings."""
         name = self.name_emb[idx]  # (B, 768)
-        text = self.text_emb[idx]  # (B, 768)
+        absa = self.absa_scores[idx]  # (B, n_aspects * n_labels)
         tag = self._pool_tags(idx)  # (B, 768)
         price = self.price[idx]  # (B,)
         numeric = self.numeric[idx]  # (B, 4)
@@ -117,9 +119,9 @@ class RestaurantEncoder(nn.Module):
         price_oh = F.one_hot(price, num_classes=self.price_dims).float()
 
         name = self.name_proj(name)
-        text = self.text_proj(text)
+        absa = self.absa_proj(absa)
         tag = self.tag_proj(tag)
-        x = torch.cat([name, text, tag, price_oh, numeric, geo], dim=1)
+        x = torch.cat([name, absa, tag, price_oh, numeric, geo], dim=1)
         z = self.fusion(x)
         z = F.normalize(z, dim=1)
 

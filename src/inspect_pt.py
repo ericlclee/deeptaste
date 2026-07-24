@@ -1,7 +1,7 @@
 """Pretty-print the contents of a .pt file (dict of tensors / lists).
 
     python src/inspect_pt.py data/processed/features.pt
-    python src/inspect_pt.py data/processed/features.pt --key text_emb
+    python src/inspect_pt.py data/processed/features.pt --key absa_scores
     python src/inspect_pt.py data/processed/features.pt --row 0
 """
 

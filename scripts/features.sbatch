@@ -9,9 +9,11 @@
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 #
-# Encodes ~397k review texts with a sentence-transformer and pools them with
-# exponential recency weights -> features.pt, norm_stats.json, review_vecs.pt.
-# Ported from the Colab notebook; ~15-25 min on a T4, less on newer cards.
+# Encodes restaurant names/tags with a sentence-transformer, pools the
+# precomputed per-review ABSA scores (src/absa_tag_reviews.py --
+# scripts/run_absa.sh must have already produced data/processed/
+# absa_scores.pt) with exponential recency weights, and writes
+# features.pt + norm_stats.json.
 #
 # Run this BEFORE training, and re-run whenever the encoder or pooling changes.
 # Training reads features.pt; it does not regenerate it.
@@ -86,10 +88,10 @@ d = torch.load(out / "features.pt", weights_only=False)
 for k, v in d.items():
     if torch.is_tensor(v):
         print(f"{k:12} {str(tuple(v.shape)):16} {v.dtype}")
-emb = d["text_emb"]
-assert emb.ndim == 2 and emb.shape[1] > 0, f"bad text_emb shape {tuple(emb.shape)}"
-assert not torch.isnan(emb).any(), "NaNs in text_emb"
-assert not torch.isinf(emb).any(), "Infs in text_emb"
+emb = d["absa_scores"]
+assert emb.ndim == 2 and emb.shape[1] > 0, f"bad absa_scores shape {tuple(emb.shape)}"
+assert not torch.isnan(emb).any(), "NaNs in absa_scores"
+assert not torch.isinf(emb).any(), "Infs in absa_scores"
 print(f"\nOK -- {emb.shape[0]:,} restaurants x {emb.shape[1]}d")
 PY
 

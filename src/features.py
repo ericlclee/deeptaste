@@ -9,7 +9,9 @@ what sources provide, not everything Yelp happens to offer:
     lat, lng      float
     rating        1-5         z-scored with per-source stats
     n_reviews     int         log1p then z-scored, per-source stats
-    review_texts  list[str]   pooled with exponential recency weights
+    absa_scores   float       per-review food/service/price/ambience sentiment
+                              (src/absa_tag_reviews.py), pooled with exponential
+                              recency weights
 
 Exception to the source-agnostic rule: rating_std (per-restaurant std-dev of
 individual review stars, computed from train reviews only -- see "numerics"
@@ -25,12 +27,11 @@ lands near a known one ("Szechuan") with no retraining. tag_ids/tag_vecs below
 are a compression device, not vocab lock-in: any new tag can be encoded at
 serve time.
 
-Review pooling is recency-weighted (w = exp(-age_years / tau)) rather than
-depth-capped. Effective pool depth then self-adjusts -- a busy restaurant is
-described by its recent reviews, a quiet one reaches further back -- which
-matches what a live source returns without committing to a fixed depth.
-Per-review vectors are retained so the fixed weights can later be swapped for
-learned attention.
+Review-derived features (absa_scores) are recency-weighted (w = exp(-age_years
+/ tau)) rather than depth-capped. Effective pool depth then self-adjusts -- a
+busy restaurant is described by its recent reviews, a quiet one reaches
+further back -- which matches what a live source returns without committing
+to a fixed depth.
 """
 
 import argparse
@@ -130,30 +131,40 @@ def main():
             tag_mask[i, j] = True
     print(f"tag matrix: {tag_ids.shape}")
 
-    # ---- reviews: encode all, pool with recency weights
-    print(f"encoding {len(train):,} reviews (this is the slow one)")
-    vecs = sbert.encode(
-        list(train.text), batch_size=args.batch_size, show_progress_bar=True, convert_to_numpy=True
-    ).astype(np.float32)
+    # ---- reviews: load precomputed per-review ABSA aspect scores
+    # (src/absa_tag_reviews.py, run separately on a GPU node -- scores every
+    # review against food/service/price/ambience with a pretrained ABSA
+    # model) and pool them with the same exponential recency weights used
+    # everywhere else in this file, instead of re-encoding review text with
+    # a sentence-transformer here. Replaces the old text_emb branch.
+    absa = torch.load(OUT / "absa_scores.pt", weights_only=False)
+    assert list(absa["business_id"]) == list(reviews.business_id), (
+        "absa_scores.pt review order doesn't match reviews_split.parquet -- "
+        "re-run src/absa_tag_reviews.py against the current reviews_split.parquet"
+    )
+    absa_aspects = absa["aspects"]
+    absa_labels = absa["labels"]
+    train_mask = (reviews.split == "train").to_numpy()
+    absa_train = absa["scores"].float()[train_mask]  # (n_train, n_aspects, n_labels)
 
     now = reviews.date.max()
     age_years = ((now - train.date).dt.total_seconds() / (365.25 * 86400)).to_numpy(dtype=np.float32)
     w = np.exp(-age_years / args.tau)
     owner = train.business_id.map(idx).to_numpy(dtype=np.int64)
 
-    V = torch.from_numpy(vecs)
     W = torch.from_numpy(w)
     O = torch.from_numpy(owner)
-    num = torch.zeros(n, dim).index_add_(0, O, V * W[:, None])
+    num_absa = torch.zeros(n, len(absa_aspects), len(absa_labels)).index_add_(0, O, absa_train * W[:, None, None])
     den = torch.zeros(n).index_add_(0, O, W)
-    text_emb = (num / den.clamp(min=1e-8)[:, None]).numpy()
+    absa_pooled = num_absa / den.clamp(min=1e-8)[:, None, None]
 
-    text_mask = den.numpy() > 1e-8
-    n_missing = int((~text_mask).sum())
+    has_absa = den.numpy() > 1e-8
+    n_missing = int((~has_absa).sum())
     if n_missing:
-        text_emb[~text_mask] = text_emb[text_mask].mean(0)
+        absa_pooled[~has_absa] = absa_pooled[has_absa].mean(0)
+    absa_scores = absa_pooled.reshape(n, -1).numpy()  # flatten (n_aspects, n_labels) -> one vector per restaurant
     print(f"pooled with tau={args.tau}y | effective depth (sum w): median {np.median(den.numpy()):.1f}")
-    print(f"text embeddings: {text_emb.shape} | {n_missing} imputed (no train reviews)")
+    print(f"absa scores: {absa_scores.shape} ({absa_aspects} x {absa_labels}) | {n_missing} imputed (no train reviews)")
 
     # ---- price
     price_raw = pd.to_numeric(biz.price, errors="coerce").to_numpy(dtype=np.float32)
@@ -221,6 +232,8 @@ def main():
         "reference_date": str(now.date()),
         "sbert_model": MODEL,
         "sbert_dim": dim,
+        "absa_aspects": absa_aspects,
+        "absa_labels": absa_labels,
     }
 
     torch.save(
@@ -231,7 +244,7 @@ def main():
             "tag_vecs": torch.from_numpy(tag_vecs),
             "tag_ids": torch.from_numpy(tag_ids),
             "tag_mask": torch.from_numpy(tag_mask),
-            "text_emb": torch.from_numpy(text_emb),
+            "absa_scores": torch.from_numpy(absa_scores),
             "name_emb": torch.from_numpy(name_emb),
             "price": torch.from_numpy(price),
             "price_mask": torch.from_numpy(price_mask),
