@@ -58,6 +58,14 @@ class RestaurantEncoder(nn.Module):
     ):
         super().__init__()
 
+        if "absa_scores" not in features:
+            raise KeyError(
+                "features.pt has no 'absa_scores' -- it predates the ABSA review "
+                "branch (it probably still has the old 'text_emb'). Rebuild it:\n"
+                "    sbatch -p ice-gpu scripts/features.sbatch\n"
+                "which needs data/processed/absa_scores.pt from scripts/run_absa.sh."
+            )
+
         # --- frozen inputs, registered as buffers so .to(device) moves them and
         #     they are saved with the model but never receive gradients ---
         self.register_buffer("tag_vecs", features["tag_vecs"])
