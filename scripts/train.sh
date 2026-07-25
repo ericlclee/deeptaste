@@ -70,7 +70,10 @@ if not torch.cuda.is_available():
              'Run scripts/check_gpu.sbatch to diagnose.' % torch.version.cuda)
 "
 
-python src/train.py \
+# -u: Slurm redirects stdout to a file, so without it Python block-buffers and
+# per-epoch progress only lands in the log ~80 lines at a time -- a long
+# training run looks hung for its first hour.
+python -u src/train.py \
     --epochs "${EPOCHS}" \
     --batch-size "${BATCH_SIZE}" \
     --lr "${LR}" \

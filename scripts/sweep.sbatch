@@ -62,7 +62,8 @@ if not torch.cuda.is_available():
              'Run scripts/check_gpu.sbatch to diagnose.' % torch.version.cuda)
 "
 
-python src/train.py \
+# -u so the tee'd log fills in as the run progresses, not in 8KB bursts
+python -u src/train.py \
     --epochs "${EPOCHS:-20}" \
     --batch-size "${BATCH_SIZE}" \
     --lr "${LR}" \
