@@ -35,7 +35,10 @@ EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-512}"
 HARD_NEG_RATIO="${HARD_NEG_RATIO:-0.0}"   # fraction of negatives from the pos's cuisine/price/geo cluster
 HARD_NEG_K="${HARD_NEG_K:-30}"
 RATED_NEG_RATIO="${RATED_NEG_RATIO:-1.0}"   # fraction of negatives from this user's own below-threshold reviews
-EXTRA_ARGS="${EXTRA_ARGS:-}"   # e.g. EXTRA_ARGS=--eval-test
+# e.g. EXTRA_ARGS=--eval-test, or the two ablations:
+#   EXTRA_ARGS=--no-id-emb   content-only item tower (how much is memorization?)
+#   EXTRA_ARGS=--fixed-agg   pin user-tower weights at (rating - global_mean)
+EXTRA_ARGS="${EXTRA_ARGS:-}"
 
 # Slurm starts the job in the submit directory; be explicit anyway so the job is
 # not silently dependent on where it was launched from.

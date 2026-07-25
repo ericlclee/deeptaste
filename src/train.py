@@ -1,14 +1,16 @@
 """BPR training loop for the two-tower recommender.
 
-Plumbing (Dataset, user-history precompute, negative sampling, the loop) is done.
-You fill in the two `Q:` functions -- aggregate_user_emb and bpr_loss -- which are
-the heart of the method.
+user_emb is a signed-weighted pool of the SAME encoder's outputs on the
+restaurants that user rated (see model.UserProfile). So gradients flow from the
+BPR loss, through the positive/negative embeddings AND through the user's
+history embeddings, all into the one shared RestaurantEncoder -- which is what
+makes the two-stage design "effectively end-to-end".
 
-The user tower has no parameters of its own: user_emb is a signed-weighted pool of
-the SAME encoder's outputs on the restaurants that user rated. So gradients flow
-from the BPR loss, through the positive/negative embeddings AND through the user's
-history embeddings, all into the one shared RestaurantEncoder. That is what makes
-the two-stage design "effectively end-to-end".
+Scoring is cos(user, item) + item_bias, not cosine alone: both towers are
+normalized, so the cosine term carries "does this match your taste" and the bias
+term carries "is this place generally any good". Collapsing both into one
+normalized dot product means a model that ranks well for a typical user has to
+fight its own geometry.
 """
 
 import argparse
@@ -21,7 +23,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
-from model import RestaurantEncoder
+from model import RestaurantEncoder, UserProfile
 
 # Default is repo-relative; DEEP_TASTE_DATA lets a scheduler point at scratch
 # without depending on the job's working directory.
@@ -206,61 +208,9 @@ class BPRDataset(Dataset):
         return u, pos, self._random_negative(seen)
 
 
-# ---------------------------------------------------------------------------
-# YOUR TWO FUNCTIONS
-# ---------------------------------------------------------------------------
-def aggregate_user_emb(
-    encoder: RestaurantEncoder,
-    user_idx: torch.Tensor,  # (B,)
-    exclude: torch.Tensor,  # (B,) the positive r_idx to leave out of each history
-    hist_items: torch.Tensor,  # (n_users, H) padded restaurant indices
-    hist_ratings: torch.Tensor,  # (n_users, H) padded raw stars
-    hist_mask: torch.Tensor,  # (n_users, H) bool
-    global_mean: float,
-) -> torch.Tensor:
-    """Build (B, dim) L2-normalized user embeddings from rated-restaurant history.
-
-    This is _pool_tags one level up: same padded-set masked pool, but the weights
-    are SIGNED ratings, and the current positive must be left out (leave-one-out).
-
-    Q: gather this batch's history rows: items, ratings, mask -> each (B, H).
-    Q: leave-one-out -- zero the mask wherever items == exclude[:, None], so the
-       positive can't leak into the profile that predicts it.
-    Q: signed weights. Per-user mean-centering (rating - user_mean) is the spec,
-       but it degenerates for the 7.2% zero-variance users (all weights 0 -> zero
-       user_emb). Decide a fallback (e.g. center on global_mean for those users).
-    Q: encode the history items through `encoder` (flatten to (B*H,), encode,
-       reshape back to (B, H, dim)). Padded positions encode garbage but the mask
-       zeroes them.
-    Q: weighted masked pool over H: sum(weight * emb) / sum(|weight|)-ish. Think
-       about what to divide by so a confident user and a lukewarm one are comparable.
-    Q: L2-normalize the result so score = dot = cosine.
-    """
-    items = hist_items[user_idx]
-    ratings = hist_ratings[user_idx]
-    mask = hist_mask[user_idx]
-
-    loo_mask = mask & (items != exclude.unsqueeze(1))
-
-    N, H = items.shape
-    items = items.reshape(-1)
-    loo_mask_1d = loo_mask.reshape(-1).unsqueeze(-1)
-    rating_dev = (ratings - global_mean).reshape(-1).unsqueeze(-1)
-    rating_count = loo_mask.sum(dim=1).clamp(min=1).unsqueeze(-1)
-
-    emb = encoder(items)
-    emb = emb * loo_mask_1d * rating_dev
-    emb = emb.reshape(N, H, -1).sum(dim=1) / rating_count
-    emb = F.normalize(emb, dim=1)
-    return emb
-
-
 def bpr_loss(pos_score: torch.Tensor, neg_score: torch.Tensor) -> torch.Tensor:
-    """Bayesian Personalized Ranking loss.
-
-    Q: -log sigmoid(pos_score - neg_score), averaged over the batch. Use
-       F.logsigmoid for numerical stability (not log(sigmoid(...))).
-    """
+    """Bayesian Personalized Ranking loss: -log sigmoid(pos - neg). F.logsigmoid
+    rather than log(sigmoid(...)) for numerical stability."""
     return -F.logsigmoid(pos_score - neg_score).mean()
 
 
@@ -280,6 +230,12 @@ def main():
         default=None,
         help="where to write the best-val checkpoint (default: <data>/encoder.pt). "
         "Give each run its own path when sweeping, or they overwrite each other.",
+    )
+    p.add_argument(
+        "--init-checkpoint",
+        default=None,
+        help="warm-start the encoder from a checkpoint (e.g. pretrain_encoder.py's "
+        "content-similarity pretraining) instead of random init",
     )
     p.add_argument("--eval-k", type=int, default=10)  # k for the per-epoch HR/NDCG
     p.add_argument("--eval-batch-size", type=int, default=512)
@@ -306,6 +262,19 @@ def main():
         "priority negative source, tried before hard/random); 0 disables it",
     )
     p.add_argument(
+        "--no-id-emb",
+        action="store_true",
+        help="ablate the per-restaurant id embedding, leaving a content-only item "
+        "tower. Use to measure how much of the model's ranking comes from "
+        "memorization vs. generalizable content features.",
+    )
+    p.add_argument(
+        "--fixed-agg",
+        action="store_true",
+        help="pin the user tower's per-star weights at (rating - global_mean) "
+        "instead of learning them",
+    )
+    p.add_argument(
         "--eval-test",
         action="store_true",
         help="also print test metrics each epoch. Off by default: checkpoints are "
@@ -324,17 +293,26 @@ def main():
     print(f"device: {device}")
     data = build_training_data(args.max_history)
 
-    encoder = RestaurantEncoder(data["features"], output_dims=args.output_dims).to(
-        device
-    )
+    encoder = RestaurantEncoder(
+        data["features"], output_dims=args.output_dims, use_id_emb=not args.no_id_emb
+    ).to(device)
+    if args.init_checkpoint:
+        encoder.load_state_dict(torch.load(args.init_checkpoint, map_location=device))
+        print(f"warm-started encoder from {args.init_checkpoint}")
+    global_mean = data["global_mean"]
+    user_profile = UserProfile(global_mean, learned=not args.fixed_agg).to(device)
+
     hist_items = data["hist_items"].to(device)
     hist_ratings = data["hist_ratings"].to(device)
     hist_mask = data["hist_mask"].to(device)
-    global_mean = data["global_mean"]
 
     print(
         f"hard-neg ratio: {args.hard_neg_ratio} (k={args.hard_neg_k})  |  "
         f"rated-neg ratio: {args.rated_neg_ratio}"
+    )
+    print(
+        f"item tower: {'content + id embedding' if not args.no_id_emb else 'content only (id ablated)'}"
+        f"  |  user tower: {'learned' if not args.fixed_agg else 'fixed'} per-star weights"
     )
     loader = DataLoader(
         BPRDataset(
@@ -347,7 +325,9 @@ def main():
         shuffle=True,
         num_workers=0,
     )
-    opt = torch.optim.Adam(encoder.parameters(), lr=args.lr)
+    opt = torch.optim.Adam(
+        list(encoder.parameters()) + list(user_profile.parameters()), lr=args.lr
+    )
 
     # Imported here, not at module scope: evaluate.py imports from train.py, so a
     # top-level import would be circular.
@@ -373,31 +353,34 @@ def main():
 
     def eval_ndcg(users, items, seen):
         ranks = rank_heldout(
-            encoder, users, items, seen, hist_items, hist_ratings, hist_mask,
-            global_mean, n_rest, device, args.eval_batch_size,
+            encoder, user_profile, users, items, seen, hist_items, hist_ratings,
+            hist_mask, n_rest, device, args.eval_batch_size,
         )
         return hr_at_k(ranks, args.eval_k), ndcg_at_k(ranks, args.eval_k)
 
+    trainable = list(encoder.parameters()) + list(user_profile.parameters())
     best_ndcg, best_epoch = -1.0, 0
     for epoch in range(args.epochs):
         encoder.train()
+        user_profile.train()
         total = 0.0
         for u, pos, neg in loader:
             u, pos, neg = u.to(device), pos.to(device), neg.to(device)
 
-            user_emb = aggregate_user_emb(
-                encoder, u, pos, hist_items, hist_ratings, hist_mask, global_mean
+            user_emb = user_profile(
+                encoder, u, pos, hist_items, hist_ratings, hist_mask
             )
             pos_emb = encoder(pos)
             neg_emb = encoder(neg)
 
-            pos_score = (user_emb * pos_emb).sum(dim=1)  # dot = cosine (all unit)
-            neg_score = (user_emb * neg_emb).sum(dim=1)
+            # cosine (both towers unit-norm) + per-item popularity bias
+            pos_score = (user_emb * pos_emb).sum(dim=1) + encoder.bias(pos)
+            neg_score = (user_emb * neg_emb).sum(dim=1) + encoder.bias(neg)
             loss = bpr_loss(pos_score, neg_score)
 
             opt.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(encoder.parameters(), max_norm=args.clip)
+            torch.nn.utils.clip_grad_norm_(trainable, max_norm=args.clip)
             opt.step()
             total += loss.item() * len(u)
 
@@ -417,7 +400,16 @@ def main():
 
         if val_ndcg > best_ndcg:
             best_ndcg, best_epoch = val_ndcg, epoch + 1
-            torch.save(encoder.state_dict(), ckpt_path)
+            torch.save(
+                {
+                    "encoder": encoder.state_dict(),
+                    "user_profile": user_profile.state_dict(),
+                    "output_dims": args.output_dims,
+                    "use_id_emb": not args.no_id_emb,
+                    "global_mean": global_mean,
+                },
+                ckpt_path,
+            )
             line += "  *best"
         print(line)
 
@@ -425,6 +417,11 @@ def main():
         f"\nsaved {ckpt_path} from epoch {best_epoch} "
         f"(best val NDCG@{args.eval_k} {best_ndcg:.4f})"
     )
+    # The learned per-star weights are the interpretable payoff of a trainable
+    # user tower -- print them rather than leaving them buried in the checkpoint.
+    w = user_profile.level_weight.detach().cpu()
+    print(f"user tower, {'learned' if not args.fixed_agg else 'fixed'} weight per star rating:")
+    print("  " + "  ".join(f"{s}star={w[s - 1]:+.3f}" for s in range(1, len(w) + 1)))
 
 
 if __name__ == "__main__":

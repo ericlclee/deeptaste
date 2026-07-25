@@ -49,8 +49,14 @@ decision. Stretch goal: extend to a real 2-layer bidirectional GNN
 **Inputs (per restaurant), by modality:**
 - Categorical: cuisine tags (multi-label), price tier → `nn.Embedding`
   lookup, averaged across multi-label cuisines.
-- Text: review text → pretrained sentence embeddings (Sentence-BERT /
-  all-MiniLM, frozen initially), mean-pooled across a restaurant's reviews.
+- Text: review text → aspect-sentiment scores from a pretrained ABSA
+  (aspect-based sentiment analysis) model, not a general-purpose sentence
+  embedding. Each review is scored against food/service/price/ambience
+  (Negative/Neutral/Positive), then recency-weighted mean-pooled
+  (`w = exp(-age_years / tau)`) across a restaurant's reviews into a 12-dim
+  vector (`src/absa_tag_reviews.py` scores reviews, `features.py` pools
+  them). See note below on why this replaced a plain SBERT-pooled
+  embedding.
 - Geographic: lat/long, normalized or geohash-bucketed + embedded.
 - Numerical: average rating, review count, rating distribution (5-dim
   histogram of 1-5 star %), all z-score normalized.
@@ -59,21 +65,59 @@ decision. Stretch goal: extend to a real 2-layer bidirectional GNN
 ReLU, dropout) → final embedding (start with dim 64-128). L2-normalize
 output.
 
+**Hybrid item tower (content + id).** The fused content embedding is added to
+a free per-restaurant `nn.Embedding` before normalizing. Content alone forces
+two restaurants with the same cuisine/price/neighborhood/aspect scores to
+*identical* vectors no matter how differently users treat them — the tower
+structurally cannot express collaborative signal, which caps ranking quality
+regardless of how good the features are. The id term absorbs that residual;
+it is initialized near zero so the model stays content-driven unless the data
+demands memorization, and `--no-id-emb` ablates it to measure the split.
+Cold-start still works because the content path is intact and is what
+`pretrain_encoder.py` trains.
+
+**Item bias.** Score is `cos(user, item) + item_bias`, not cosine alone. Both
+towers are L2-normalized, which deletes any notion of "this place is just
+generally good" — and popularity is a strong baseline signal, so forbidding
+the model from expressing it means fighting its own geometry.
+
+**Text modality, revised:** the original plan (SBERT-pooled review
+embeddings, `text_emb`) carried no measurable signal for review-level
+aspects — a classifier trained on top of it failed to beat a majority-class
+baseline. A custom LLM-based tag-extraction pipeline (46-tag taxonomy,
+Haiku-labeled, ~1,200 restaurants) was built next and worked, but was slow
+and expensive to scale further. Replaced it with a pretrained ABSA model off
+Hugging Face (PyABSA's `yangheng/deberta-v3-base-absa-v1.1`, ~1M downloads)
+that already solves a closely related, well-established task (SemEval's
+restaurant ABSA benchmark) — leveraging existing infrastructure instead of
+re-deriving it from scratch, which is itself a defensible modeling decision
+to call out in a writeup.
+
 **This MLP's weights are the trainable part of the restaurant tower.**
 
 ## Component 2: User Profile (Aggregation)
 
 `user_emb = L2_normalize( Σ_i  w(rating_i) · restaurant_emb_i )`
 
-where `w(rating)` is a **signed** weight (e.g. `rating - 3`, or
-`rating - user's_average_rating`) — critical detail, using raw 1-5 star
+where `w(rating)` is a **signed** weight — critical detail, using raw 1-5 star
 value directly makes everything additive and breaks the "negative reviews
 should subtract" intent.
 
-Starting version: fixed weighted sum, no separate trainable aggregation
-network (two-stage training, see below).
-Stretch: learned aggregation (attention over rated restaurants — SASRec-style
-self-attention weighting by recency/relevance) instead of fixed weights.
+`w` is a **learned scalar per star level**, initialized to exactly
+`rating - global_mean` so training starts equivalent to the hand-set heuristic
+and departs from it only if the data says so. This is deliberately minimal (5
+parameters) but it is what makes "two-tower" honest rather than a relabeling of
+item-kNN — with a fully fixed aggregation the user tower has no parameters and
+`score = Σ_i w_i·⟨e_i, e_j⟩` is literally item-based CF with a learned metric.
+The learned values are also directly readable afterwards ("what does a 3-star
+review actually mean to this model?"). `--fixed-agg` pins them.
+
+Note: the pooled profile is L2-normalized, so any scalar divisor (review count,
+sum of weights) cancels exactly — user *confidence* is not expressible in this
+formulation by construction, and lives in `item_bias`/score scale instead.
+
+Stretch: learned aggregation over rated restaurants (SASRec-style
+self-attention weighting by recency/relevance) instead of per-level scalars.
 
 ## Training
 
@@ -156,11 +200,16 @@ by the encoder or aggregation:
 
 1. Data pipeline: load Yelp Open Dataset, filter to a manageable
    metro area, build (user, business, rating, review_text) table.
-2. Restaurant encoder: feature extraction + fusion MLP, sanity-check
-   embeddings (nearest-neighbor restaurants should look sensible).
-3. User aggregation (fixed weighted sum) + BPR training loop with random
+2. Restaurant encoder: feature extraction (incl. pretrained-ABSA review
+   scoring, see Component 1) + fusion MLP, sanity-check embeddings
+   (nearest-neighbor restaurants should look sensible).
+3. User aggregation (signed weighted sum) + BPR training loop with random
    negatives. Get end-to-end training working.
-4. Evaluation: precision@k / recall@k / NDCG on held-out reviews.
+4. Evaluation: HR@k / NDCG@k / MRR on held-out reviews, **always reported
+   against baselines** (random, popularity, mean rating, geo proximity) under
+   identical candidate masking. An HR@k in isolation is uninterpretable, and
+   popularity in particular is notoriously hard to beat — a model that loses to
+   it is not a working recommender however principled its architecture.
 5. Hard-negative sampling upgrade.
 6. Online EMA profile update + simple demo (rate a restaurant, watch
    recommendations shift).
@@ -172,7 +221,10 @@ by the encoder or aggregation:
 ## Tech Stack
 
 - PyTorch (core model)
-- sentence-transformers (frozen text embeddings)
+- sentence-transformers (frozen embeddings for cuisine tags and restaurant
+  names — no longer used for review text, see Component 1)
+- transformers (Hugging Face) — pretrained ABSA model for per-review
+  aspect-sentiment scoring, frozen
 - pandas / polars (data pipeline)
 - FAISS (vector index, once past prototyping with plain matrix ops)
 - PyTorch Geometric or DGL — only needed if/when extending to a real

@@ -70,6 +70,15 @@ def main():
 
     p = argparse.ArgumentParser()
     p.add_argument("--tau", type=float, default=2.0, help="recency half-life in years")
+    p.add_argument(
+        "--absa-kappa",
+        type=float,
+        default=2.0,
+        help="shrinkage strength for pooled ABSA scores, in 'reviews worth of "
+        "prior'. Roughly the median effective pool depth, so a typical "
+        "restaurant is a 50/50 blend of its own reviews and the catalog mean; "
+        "0 disables shrinkage",
+    )
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument(
         "--n-geo-clusters",
@@ -156,15 +165,34 @@ def main():
     O = torch.from_numpy(owner)
     num_absa = torch.zeros(n, len(absa_aspects), len(absa_labels)).index_add_(0, O, absa_train * W[:, None, None])
     den = torch.zeros(n).index_add_(0, O, W)
-    absa_pooled = num_absa / den.clamp(min=1e-8)[:, None, None]
 
-    has_absa = den.numpy() > 1e-8
-    n_missing = int((~has_absa).sum())
-    if n_missing:
-        absa_pooled[~has_absa] = absa_pooled[has_absa].mean(0)
+    # Shrink toward the catalog-wide profile. Median effective depth is only ~2
+    # reviews, so without this, half the catalog's aspect scores are decided by
+    # one or two recent reviews -- variance dressed up as signal. kappa is "how
+    # many reviews' worth of prior to blend in": sum(w) >> kappa keeps a
+    # restaurant's own profile, sum(w) << kappa falls back toward the average
+    # restaurant. Also subsumes the no-train-reviews case, which lands exactly
+    # on the prior instead of needing a separate imputation branch.
+    prior = (absa_train * W[:, None, None]).sum(0) / W.sum().clamp(min=1e-8)
+    absa_pooled = (num_absa + args.absa_kappa * prior) / (den + args.absa_kappa)[:, None, None]
+
+    n_missing = int((den.numpy() <= 1e-8).sum())
     absa_scores = absa_pooled.reshape(n, -1).numpy()  # flatten (n_aspects, n_labels) -> one vector per restaurant
-    print(f"pooled with tau={args.tau}y | effective depth (sum w): median {np.median(den.numpy()):.1f}")
-    print(f"absa scores: {absa_scores.shape} ({absa_aspects} x {absa_labels}) | {n_missing} imputed (no train reviews)")
+    print(f"pooled with tau={args.tau}y kappa={args.absa_kappa} | effective depth (sum w): median {np.median(den.numpy()):.1f}")
+    print(f"absa scores: {absa_scores.shape} ({absa_aspects} x {absa_labels}) | {n_missing} fell back to the prior (no train reviews)")
+
+    # Redundancy check. Aspect sentiment co-moves hard with overall review
+    # valence, and mean star rating is ALREADY a feature (numeric[:, 0]) -- so
+    # if these 12 dims are just a re-encoding of the rating, the ABSA branch is
+    # spending parameters to say something the model already knows. Cheap to
+    # print, and the answer decides whether the aspect signal is worth building
+    # on or needs a different extraction.
+    stars_np = biz.stars.to_numpy(dtype=np.float32)
+    r = np.abs([np.corrcoef(absa_scores[:, j], stars_np)[0, 1] for j in range(absa_scores.shape[1])])
+    sv = np.linalg.svd(absa_scores - absa_scores.mean(0), compute_uv=False)
+    n90 = int(np.searchsorted((sv**2 / (sv**2).sum()).cumsum(), 0.90) + 1)
+    print(f"absa vs. mean rating |r|: max {r.max():.3f} median {np.median(r):.3f} "
+          f"| {n90}/{absa_scores.shape[1]} dims carry 90% of variance")
 
     # ---- price
     price_raw = pd.to_numeric(biz.price, errors="coerce").to_numpy(dtype=np.float32)
@@ -178,7 +206,7 @@ def main():
     tag_count_z, t_mu, t_sd = zscore(np.array([len(t) for t in tag_lists], dtype=np.float32))
 
     # rating_std: within-restaurant disagreement, from TRAIN reviews only (same
-    # leakage boundary as text_emb above). A restaurant with <2 train reviews
+    # leakage boundary as the ABSA pooling above). A restaurant with <2 train reviews
     # has an undefined std -- fill with the population median (neutral), not 0,
     # which would falsely assert "perfectly consistent" for a restaurant we
     # simply have no variance evidence for.
