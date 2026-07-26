@@ -13,13 +13,14 @@ what sources provide, not everything Yelp happens to offer:
                               (src/absa_tag_reviews.py), pooled with exponential
                               recency weights
 
-Exception to the source-agnostic rule: rating_std (per-restaurant std-dev of
-individual review stars, computed from train reviews only -- see "numerics"
-below). Google Places doesn't expose a rating distribution, so this is a
-Yelp-only signal for now; per the project spec Google enrichment is an
-optional later phase, so this is an accepted tradeoff, not an oversight. If
-Google Places support is ever added, this column needs a fallback (impute
-the population mean, or drop the column) for restaurants from that source.
+rating_std (per-restaurant std-dev of individual review stars, computed from
+train reviews only -- see "numerics" below) was previously documented here as
+a Yelp-only exception, on the grounds that Google Places doesn't return a
+rating distribution. That is true of the Places *API* but not of the source:
+Apify's Google Maps scraper returns reviewsDistribution (a 1-5 star
+histogram), which yields the identical quantity -- verified against
+per-review stars in src/test_adapt_google.py. So the contract is portable
+after all; the constraint was the API, not Google. See src/adapt_google.py.
 
 Tags are encoded by running the tag *name* through the sentence encoder rather
 than a learned nn.Embedding, so an unseen vocabulary ("chinese_restaurant")
@@ -256,6 +257,15 @@ def main():
         # cluster centers, so a new restaurant at serve time is assigned to the
         # nearest existing cluster rather than refitting KMeans on one point.
         "geo_cluster_centers": centers.tolist(),
+        # ...and their sizes, without which log_cluster_size is not reconstructible
+        # for a restaurant that wasn't in the catalog at build time.
+        "geo_cluster_sizes": cluster_counts.tolist(),
+        # catalog-wide ABSA profile: the shrinkage target. A newly-scraped
+        # restaurant with 3 reviews needs this to be pooled the same way the
+        # training catalog was, so it must travel with the stats, not be
+        # recomputed from whatever reviews happen to be on hand.
+        "absa_prior": prior.reshape(-1).tolist(),
+        "absa_kappa": args.absa_kappa,
         "recency_tau_years": args.tau,
         "reference_date": str(now.date()),
         "sbert_model": MODEL,

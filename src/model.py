@@ -130,26 +130,63 @@ class RestaurantEncoder(nn.Module):
         vecs = vecs.sum(dim=1) / count
         return vecs
 
+    def fuse(
+        self,
+        name_emb: torch.Tensor,  # (B, sbert_dims)
+        absa: torch.Tensor,  # (B, n_aspects * n_labels)
+        tag_vec: torch.Tensor,  # (B, sbert_dims) already pooled
+        price: torch.Tensor,  # (B,) long, tier 0..4
+        numeric: torch.Tensor,  # (B, 4) z-scored
+        geo: torch.Tensor,  # (B, 5) z-scored
+    ) -> torch.Tensor:
+        """The content path, over RAW feature tensors rather than catalog indices.
+
+        Split out from content_embedding so a restaurant that was never in the
+        training catalog can still be embedded -- see embed_new(). Indexing
+        buffers by position works only for restaurants that existed at build
+        time, which would make the "live Google Places enrichment" path in the
+        project spec impossible.
+        """
+        dense = torch.cat(
+            [F.one_hot(price, num_classes=self.price_dims).float(), numeric, geo], dim=1
+        )
+        return self.fusion(
+            torch.cat(
+                [
+                    self.name_proj(name_emb),
+                    self.absa_proj(absa),
+                    self.tag_proj(tag_vec),
+                    self.dense_proj(dense),
+                ],
+                dim=1,
+            )
+        )
+
     def content_embedding(self, idx: torch.Tensor) -> torch.Tensor:
         """Content-only embedding, pre-normalization and without the id term.
 
         This is the path that generalizes to unseen restaurants, so it is also
         what content pretraining (src/pretrain_encoder.py) trains.
         """
-        name = self.name_proj(self.name_emb[idx])
-        absa = self.absa_proj(self.absa_scores[idx])
-        tag = self.tag_proj(self._pool_tags(idx))
-        dense = self.dense_proj(
-            torch.cat(
-                [
-                    F.one_hot(self.price[idx], num_classes=self.price_dims).float(),
-                    self.numeric[idx],
-                    self.geo[idx],
-                ],
-                dim=1,
-            )
+        return self.fuse(
+            self.name_emb[idx],
+            self.absa_scores[idx],
+            self._pool_tags(idx),
+            self.price[idx],
+            self.numeric[idx],
+            self.geo[idx],
         )
-        return self.fusion(torch.cat([name, absa, tag, dense], dim=1))
+
+    def embed_new(self, **features: torch.Tensor) -> torch.Tensor:
+        """Embed a restaurant that is NOT in the training catalog (e.g. one just
+        scraped from Google Maps -- see src/adapt_google.py).
+
+        Content path only: there is no id embedding or bias for a restaurant the
+        model has never seen, which is the correct cold-start behaviour rather
+        than a limitation. Scores for it come purely from taste matching, with
+        no popularity offset, until it accumulates real interactions.
+        """
+        return F.normalize(self.fuse(**features), dim=1)
 
     def forward(self, idx: torch.Tensor) -> torch.Tensor:
         """idx: (B,) restaurant indices. Returns (B, dim) L2-normalized embeddings."""
