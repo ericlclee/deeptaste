@@ -243,6 +243,19 @@ def main():
         output_dims=ckpt.get("output_dims", 128),
         use_id_emb=ckpt.get("use_id_emb", True),
     ).to(device)
+
+    # Fail with the actual reason rather than an opaque shape mismatch inside a
+    # Linear, which is what happens if a checkpoint trained on one source is
+    # pointed at another source's features.
+    want = ckpt.get("modalities")
+    got = {"tags": enc.has_tags, "price": enc.has_price, "geo": enc.has_geo}
+    if want is not None and want != got:
+        raise SystemExit(
+            f"checkpoint was trained with modalities {want} but {OUT}/features.pt "
+            f"has {got}. This checkpoint belongs to a different data source"
+            + (f" ({ckpt['data_dir']})" if ckpt.get("data_dir") else "")
+            + " -- point --checkpoint and DEEP_TASTE_DATA at the same one."
+        )
     enc.load_state_dict(ckpt["encoder"])
     enc.eval()
     user_profile = UserProfile(ckpt.get("global_mean", data["global_mean"])).to(device)
@@ -273,12 +286,18 @@ def main():
     report("random", rank_item_scalar(torch.rand(n_rest), test_users, test_items, seen, device, args.batch_size), args.ks, n_rest)
     report("popularity", rank_item_scalar(feats["numeric"][:, 1], test_users, test_items, seen, device, args.batch_size), args.ks, n_rest)
     report("mean rating", rank_item_scalar(feats["numeric"][:, 0], test_users, test_items, seen, device, args.batch_size), args.ks, n_rest)
-    report(
-        "geo proximity",
-        rank_geo(feats["latlng"], test_users, test_items, seen, hist_items, hist_mask, device, args.batch_size),
-        args.ks,
-        n_rest,
-    )
+    # Sources without coordinates (e.g. the TripAdvisor London set) simply lose
+    # this baseline -- better to say so than to quietly report three baselines
+    # and leave the reader assuming four were checked.
+    if "latlng" in feats:
+        report(
+            "geo proximity",
+            rank_geo(feats["latlng"], test_users, test_items, seen, hist_items, hist_mask, device, args.batch_size),
+            args.ks,
+            n_rest,
+        )
+    else:
+        print(f"{'geo proximity':<22} {'--  no coordinates in this data source':>7}")
     report(
         "MODEL",
         rank_heldout(

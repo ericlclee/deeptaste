@@ -2,13 +2,14 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 import pandas as pd
 from tqdm import tqdm
 
-RAW = Path("data/raw")
-OUT = Path("data/processed")
+RAW = Path(os.environ.get("DEEP_TASTE_RAW", "data/raw"))
+OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/processed"))
 
 
 def load_businesses(city: str | None) -> pd.DataFrame:

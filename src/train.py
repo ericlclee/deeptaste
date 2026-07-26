@@ -103,6 +103,14 @@ def build_hard_candidates(feats: dict, k: int = 30) -> list[np.ndarray]:
     """
     from sklearn.neighbors import NearestNeighbors
 
+    missing = [k for k in ("latlng", "price", "tag_ids") if k not in feats]
+    if missing:
+        raise KeyError(
+            f"hard-negative sampling needs {missing}, which this data source does not "
+            "provide (the TripAdvisor London set has no coordinates, price tier or "
+            "cuisine categories). Run with --hard-neg-ratio 0."
+        )
+
     latlng = feats["latlng"].numpy()
     price = feats["price"].numpy()
     price_mask = feats["price_mask"].numpy()
@@ -228,8 +236,15 @@ def main():
     p.add_argument(
         "--checkpoint",
         default=None,
-        help="where to write the best-val checkpoint (default: <data>/encoder.pt). "
-        "Give each run its own path when sweeping, or they overwrite each other.",
+        help="explicit checkpoint path. Overrides --run-name.",
+    )
+    p.add_argument(
+        "--run-name",
+        default=None,
+        help="write to runs/<data-dir-name>/<run-name>/encoder.pt instead of "
+        "overwriting <data>/encoder.pt. Every unnamed run clobbers the previous "
+        "one, which silently destroys the model an ablation is meant to be "
+        "compared against; name your runs and they accumulate side by side.",
     )
     p.add_argument(
         "--init-checkpoint",
@@ -281,8 +296,14 @@ def main():
         "selected on val, and repeatedly reading test biases it into a second val set.",
     )
     args = p.parse_args()
-    ckpt_path = Path(args.checkpoint) if args.checkpoint else OUT / "encoder.pt"
+    if args.checkpoint:
+        ckpt_path = Path(args.checkpoint)
+    elif args.run_name:
+        ckpt_path = Path("runs") / OUT.name / args.run_name / "encoder.pt"
+    else:
+        ckpt_path = OUT / "encoder.pt"
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"checkpoint: {ckpt_path}")
 
     if torch.cuda.is_available():
         device = "cuda"
@@ -407,6 +428,18 @@ def main():
                     "output_dims": args.output_dims,
                     "use_id_emb": not args.no_id_emb,
                     "global_mean": global_mean,
+                    # Which content branches this model was built with. Without
+                    # it, loading a London checkpoint (no tag/price/geo branches)
+                    # against Yelp features fails as an opaque shape mismatch
+                    # deep inside a Linear rather than saying what is wrong.
+                    "modalities": {
+                        "tags": encoder.has_tags,
+                        "price": encoder.has_price,
+                        "geo": encoder.has_geo,
+                    },
+                    "data_dir": str(OUT),
+                    "epoch": epoch + 1,
+                    "val_ndcg": val_ndcg,
                 },
                 ckpt_path,
             )

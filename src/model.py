@@ -68,22 +68,34 @@ class RestaurantEncoder(nn.Module):
 
         # --- frozen inputs, registered as buffers so .to(device) moves them and
         #     they are saved with the model but never receive gradients ---
-        self.register_buffer("tag_vecs", features["tag_vecs"])
-        self.register_buffer("tag_ids", features["tag_ids"])  # (N, T_max) int
-        self.register_buffer("tag_mask", features["tag_mask"])  # (N, T_max) bool
+        # Which content modalities this source actually provides. Yelp gives all
+        # of them; the TripAdvisor London source has no cuisine categories,
+        # price tier or coordinates, so those branches are simply not built
+        # rather than being fed placeholder values -- a constant input would
+        # still consume fusion width and let the model fit noise through it.
+        self.has_tags = "tag_vecs" in features
+        self.has_price = "price" in features
+        self.has_geo = "geo" in features
+
+        if self.has_tags:
+            self.register_buffer("tag_vecs", features["tag_vecs"])
+            self.register_buffer("tag_ids", features["tag_ids"])  # (N, T_max) int
+            self.register_buffer("tag_mask", features["tag_mask"])  # (N, T_max) bool
         # (N, n_aspects * n_labels) -- recency-weighted food/service/price/ambience
         # sentiment from src/absa_tag_reviews.py, flattened.
         self.register_buffer("absa_scores", features["absa_scores"])
         self.register_buffer("name_emb", features["name_emb"])  # (N, 768)
-        self.register_buffer(
-            "price", features["price"].long()
-        )  # (N,) tiers 0..4, 0 = missing
+        if self.has_price:
+            self.register_buffer(
+                "price", features["price"].long()
+            )  # (N,) tiers 0..4, 0 = missing
         self.register_buffer(
             "numeric", features["numeric"]
-        )  # (N, 4) z-scored: rating, log_count, tag_count, rating_std
-        self.register_buffer(
-            "geo", features["geo"]
-        )  # (N, 5) z-scored: lat, lng, dist_center, dist_cluster, log_cluster_size
+        )  # (N, 3-4) z-scored: rating, log_count, [tag_count], rating_std
+        if self.has_geo:
+            self.register_buffer(
+                "geo", features["geo"]
+            )  # (N, 5) z-scored: lat, lng, dist_center, dist_cluster, log_cluster_size
         self.n_restaurants = self.absa_scores.shape[0]
         self.output_dims = output_dims
         self.use_id_emb = use_id_emb
@@ -92,19 +104,21 @@ class RestaurantEncoder(nn.Module):
         #     fusion MLP can weight them independently (the reason we concat
         #     rather than pre-average) ---
         sbert_dims = self.name_emb.shape[1]
-        self.price_dims = int(self.price.max()) + 1  # 4 tiers + "missing"
+        self.price_dims = (int(self.price.max()) + 1) if self.has_price else 0
         self.name_proj = nn.Linear(sbert_dims, branch_dims)
         self.absa_proj = nn.Linear(self.absa_scores.shape[1], branch_dims)
-        self.tag_proj = nn.Linear(sbert_dims, branch_dims)
-        # Price/numeric/geo are only ~14 raw dims against three 128-dim branches,
-        # so at init they contribute ~4% of the concatenated width -- despite
-        # containing star rating and distance, plausibly the two most predictive
-        # features for restaurant choice. Project them up so the fusion MLP sees
-        # them on comparable footing instead of as a rounding error.
-        dense_dims = self.price_dims + self.numeric.shape[1] + self.geo.shape[1]
+        if self.has_tags:
+            self.tag_proj = nn.Linear(sbert_dims, branch_dims)
+        # Price/numeric/geo are only ~14 raw dims against the wide 128-dim
+        # branches, so at init they contribute ~4% of the concatenated width --
+        # despite containing star rating and distance, plausibly the two most
+        # predictive features for restaurant choice. Project them up so the
+        # fusion MLP sees them on comparable footing, not as a rounding error.
+        dense_dims = self.price_dims + self.numeric.shape[1] + (self.geo.shape[1] if self.has_geo else 0)
         self.dense_proj = nn.Linear(dense_dims, branch_dims // 2)
 
-        mlp_input_dims = branch_dims * 3 + branch_dims // 2
+        n_wide = 3 if self.has_tags else 2  # name + absa [+ tags]
+        mlp_input_dims = branch_dims * n_wide + branch_dims // 2
         self.fusion = nn.Sequential(
             nn.Linear(mlp_input_dims, hidden_dims),
             nn.ReLU(),
@@ -134,33 +148,45 @@ class RestaurantEncoder(nn.Module):
         self,
         name_emb: torch.Tensor,  # (B, sbert_dims)
         absa: torch.Tensor,  # (B, n_aspects * n_labels)
-        tag_vec: torch.Tensor,  # (B, sbert_dims) already pooled
-        price: torch.Tensor,  # (B,) long, tier 0..4
-        numeric: torch.Tensor,  # (B, 4) z-scored
-        geo: torch.Tensor,  # (B, 5) z-scored
+        numeric: torch.Tensor,  # (B, 3-4) z-scored
+        tag_vec: torch.Tensor | None = None,  # (B, sbert_dims) already pooled
+        price: torch.Tensor | None = None,  # (B,) long, tier 0..4
+        geo: torch.Tensor | None = None,  # (B, 5) z-scored
     ) -> torch.Tensor:
         """The content path, over RAW feature tensors rather than catalog indices.
 
         Split out from content_embedding so a restaurant that was never in the
         training catalog can still be embedded -- see embed_new(). Indexing
         buffers by position works only for restaurants that existed at build
-        time, which would make the "live Google Places enrichment" path in the
-        project spec impossible.
+        time, which would make live enrichment from another source impossible.
+
+        tag_vec/price/geo are optional because not every source provides them
+        (see the has_* flags in __init__); passing one the encoder was not
+        built with is an error rather than being silently ignored.
         """
-        dense = torch.cat(
-            [F.one_hot(price, num_classes=self.price_dims).float(), numeric, geo], dim=1
-        )
-        return self.fusion(
-            torch.cat(
-                [
-                    self.name_proj(name_emb),
-                    self.absa_proj(absa),
-                    self.tag_proj(tag_vec),
-                    self.dense_proj(dense),
-                ],
-                dim=1,
-            )
-        )
+        for name, value, present in [
+            ("tag_vec", tag_vec, self.has_tags),
+            ("price", price, self.has_price),
+            ("geo", geo, self.has_geo),
+        ]:
+            if (value is None) == present:
+                raise ValueError(
+                    f"{name} was {'omitted' if value is None else 'supplied'} but this "
+                    f"encoder was built with has_{name.split('_')[0]}="
+                    f"{present}. The feature set must match the one it was trained on."
+                )
+
+        dense = [numeric]
+        if self.has_price:
+            dense.insert(0, F.one_hot(price, num_classes=self.price_dims).float())
+        if self.has_geo:
+            dense.append(geo)
+
+        wide = [self.name_proj(name_emb), self.absa_proj(absa)]
+        if self.has_tags:
+            wide.append(self.tag_proj(tag_vec))
+        wide.append(self.dense_proj(torch.cat(dense, dim=1)))
+        return self.fusion(torch.cat(wide, dim=1))
 
     def content_embedding(self, idx: torch.Tensor) -> torch.Tensor:
         """Content-only embedding, pre-normalization and without the id term.
@@ -169,12 +195,12 @@ class RestaurantEncoder(nn.Module):
         what content pretraining (src/pretrain_encoder.py) trains.
         """
         return self.fuse(
-            self.name_emb[idx],
-            self.absa_scores[idx],
-            self._pool_tags(idx),
-            self.price[idx],
-            self.numeric[idx],
-            self.geo[idx],
+            name_emb=self.name_emb[idx],
+            absa=self.absa_scores[idx],
+            numeric=self.numeric[idx],
+            tag_vec=self._pool_tags(idx) if self.has_tags else None,
+            price=self.price[idx] if self.has_price else None,
+            geo=self.geo[idx] if self.has_geo else None,
         )
 
     def embed_new(self, **features: torch.Tensor) -> torch.Tensor:
