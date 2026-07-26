@@ -10,7 +10,7 @@ import pandas as pd
 from common import k_core
 from tqdm import tqdm
 
-RAW = Path(os.environ.get("DEEP_TASTE_RAW", "data/raw"))
+RAW = Path(os.environ.get("DEEP_TASTE_RAW", "data/raw/yelp"))
 OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/yelp_philadelphia"))
 
 

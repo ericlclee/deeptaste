@@ -45,7 +45,7 @@ import pandas as pd
 
 from common import k_core
 
-RAW = Path(os.environ.get("DEEP_TASTE_RAW", "data/raw"))
+RAW = Path(os.environ.get("DEEP_TASTE_RAW", "data/raw/tripadvisor"))
 # Deliberately NOT defaulting to data/processed: that directory holds the Yelp
 # build, and this script would overwrite businesses.parquet/reviews.parquet in
 # place. London is a different source, so it gets its own directory and the two
