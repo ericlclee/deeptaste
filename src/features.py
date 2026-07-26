@@ -162,7 +162,15 @@ def main():
     # model) and pool them with the same exponential recency weights used
     # everywhere else in this file, instead of re-encoding review text with
     # a sentence-transformer here. Replaces the old text_emb branch.
-    absa = torch.load(OUT / "absa_scores.pt", weights_only=False)
+    absa_path = OUT / "absa_scores.pt"
+    if not absa_path.exists():
+        raise SystemExit(
+            f"{absa_path} not found. Per-review ABSA scoring has to run before "
+            "features are built:\n"
+            f"    DEEP_TASTE_DATA={OUT} sbatch -p ice-gpu scripts/run_absa.sh\n"
+            "Pipeline order is prepare -> split -> run_absa -> features -> train."
+        )
+    absa = torch.load(absa_path, weights_only=False)
     assert list(absa["business_id"]) == list(reviews.business_id), (
         "absa_scores.pt review order doesn't match reviews_split.parquet -- "
         "re-run src/absa_tag_reviews.py against the current reviews_split.parquet"
