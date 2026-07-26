@@ -30,7 +30,7 @@ import pandas as pd
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/processed"))
+OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/yelp_philadelphia"))
 MODEL_NAME = "yangheng/deberta-v3-base-absa-v1.1"
 ASPECTS = ["food", "service", "price", "ambience"]
 

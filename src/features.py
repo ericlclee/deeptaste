@@ -46,7 +46,7 @@ import torch
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import KMeans
 
-OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/processed"))
+OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/yelp_philadelphia"))
 # 512-token ctx fits 97.4% of reviews whole (MiniLM's 256 fit 83.4%). Swap via
 # DEEP_TASTE_SBERT to try another encoder without editing source; the chosen name
 # is recorded in norm_stats.json so features can be traced back to their model.
@@ -118,7 +118,7 @@ def main():
     dim = sbert.get_sentence_embedding_dimension()
 
     # Which content modalities this SOURCE provides. Yelp gives all three;
-    # the TripAdvisor London set (src/prepare_london.py) has none of them, so
+    # the TripAdvisor London set (src/ingest/london.py) has none of them, so
     # the corresponding branches are omitted from features.pt entirely and
     # RestaurantEncoder builds without them. Emitting placeholder columns
     # instead would hand the model constant inputs to overfit through.
@@ -249,7 +249,7 @@ def main():
         lng_z, lng_mu, lng_sd = zscore(lng)
 
         # ---- geo clusters: cheap "which neighborhood" signal on top of raw lat/lng.
-        # KMeans on a single metro's coordinates (prepare_data.py already filters to
+        # KMeans on a single metro's coordinates (src/ingest/yelp.py already filters to
         # one city) -- plain Euclidean in degree-space, not haversine, consistent
         # with lat/lng elsewhere in this file; fine at metro scale.
         latlng_raw = np.stack([lat, lng], 1)

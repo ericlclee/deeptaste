@@ -27,7 +27,7 @@ from model import RestaurantEncoder, UserProfile
 
 # Default is repo-relative; DEEP_TASTE_DATA lets a scheduler point at scratch
 # without depending on the job's working directory.
-OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/processed"))
+OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/yelp_philadelphia"))
 POSITIVE_THRESHOLD = 4  # a rating >= this is a "positive" the user is said to prefer
 
 

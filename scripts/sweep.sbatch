@@ -44,7 +44,7 @@ module load anaconda3
 source activate "${ENV_NAME:-deeptaste}"
 
 export PYTHONPATH="${PWD}/src:${PYTHONPATH:-}"
-export DEEP_TASTE_DATA="${DEEP_TASTE_DATA:-${PWD}/data/processed}"
+export DEEP_TASTE_DATA="${DEEP_TASTE_DATA:-${PWD}/data/yelp_philadelphia}"
 export TOKENIZERS_PARALLELISM=false
 
 echo "=========================================================="

@@ -50,7 +50,7 @@ source activate "${ENV_NAME}"
 
 # src/ is not a package -- train.py does flat imports (model, evaluate).
 export PYTHONPATH="${PWD}/src:${PYTHONPATH:-}"
-export DEEP_TASTE_DATA="${DEEP_TASTE_DATA:-${PWD}/data/processed}"
+export DEEP_TASTE_DATA="${DEEP_TASTE_DATA:-${PWD}/data/yelp_philadelphia}"
 export TOKENIZERS_PARALLELISM=false
 
 echo "=========================================================="

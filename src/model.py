@@ -29,7 +29,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-OUT = Path("data/processed")
+OUT = Path("data/yelp_philadelphia")
 
 # Below this, a user profile is treated as directionless rather than
 # normalized into a random unit vector (see UserProfile.forward).
@@ -63,7 +63,7 @@ class RestaurantEncoder(nn.Module):
                 "features.pt has no 'absa_scores' -- it predates the ABSA review "
                 "branch (it probably still has the old 'text_emb'). Rebuild it:\n"
                 "    sbatch -p ice-gpu scripts/features.sbatch\n"
-                "which needs data/processed/absa_scores.pt from scripts/run_absa.sh."
+                "which needs data/yelp_philadelphia/absa_scores.pt from scripts/run_absa.sh."
             )
 
         # --- frozen inputs, registered as buffers so .to(device) moves them and

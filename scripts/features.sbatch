@@ -11,7 +11,7 @@
 #
 # Encodes restaurant names/tags with a sentence-transformer, pools the
 # precomputed per-review ABSA scores (src/absa_tag_reviews.py --
-# scripts/run_absa.sh must have already produced data/processed/
+# scripts/run_absa.sh must have already produced data/yelp_philadelphia/
 # absa_scores.pt) with exponential recency weights, and writes
 # features.pt + norm_stats.json.
 #
@@ -43,7 +43,7 @@ module load anaconda3
 source activate "${ENV_NAME}"
 
 export PYTHONPATH="${PWD}/src:${PYTHONPATH:-}"
-export DEEP_TASTE_DATA="${DEEP_TASTE_DATA:-${PWD}/data/processed}"
+export DEEP_TASTE_DATA="${DEEP_TASTE_DATA:-${PWD}/data/yelp_philadelphia}"
 export TOKENIZERS_PARALLELISM=false
 # Keep model downloads off $HOME, which has a small quota on PACE.
 export HF_HOME="${HF_HOME:-${HOME}/scratch/hf_cache}"

@@ -21,7 +21,7 @@
 # (partition name changes between semesters -- check yours with `sinfo -s`)
 #
 # The underlying script checkpoints after each aspect (food/service/price/
-# ambience) to data/processed/absa_scores.pt, so if this job hits the
+# ambience) to data/yelp_philadelphia/absa_scores.pt, so if this job hits the
 # --time limit mid-run, just resubmit the exact same command -- it picks
 # up from whichever aspects already finished instead of starting over.
 set -euo pipefail
@@ -35,7 +35,7 @@ module load anaconda3
 source activate "${ENV_NAME}"
 
 export PYTHONPATH="${PWD}/src:${PYTHONPATH:-}"
-export DEEP_TASTE_DATA="${DEEP_TASTE_DATA:-${PWD}/data/processed}"
+export DEEP_TASTE_DATA="${DEEP_TASTE_DATA:-${PWD}/data/yelp_philadelphia}"
 export TOKENIZERS_PARALLELISM=false
 # Keep model downloads off $HOME, which has a small quota on PACE.
 export HF_HOME="${HF_HOME:-${HOME}/scratch/hf_cache}"

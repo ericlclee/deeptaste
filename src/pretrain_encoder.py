@@ -30,7 +30,7 @@ id embedding is there to break.
 
 Usage:
     python src/pretrain_encoder.py
-    python src/train.py --init-checkpoint data/processed/pretrained_encoder.pt ...
+    python src/train.py --init-checkpoint data/yelp_philadelphia/pretrained_encoder.pt ...
 """
 
 import argparse
@@ -45,7 +45,7 @@ from torch.utils.data import DataLoader, Dataset
 from model import RestaurantEncoder
 from train import build_hard_candidates
 
-OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/processed"))
+OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/yelp_philadelphia"))
 
 
 class SimilarityDataset(Dataset):

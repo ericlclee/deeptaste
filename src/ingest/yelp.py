@@ -6,10 +6,12 @@ import os
 from pathlib import Path
 
 import pandas as pd
+
+from common import k_core
 from tqdm import tqdm
 
 RAW = Path(os.environ.get("DEEP_TASTE_RAW", "data/raw"))
-OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/processed"))
+OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/yelp_philadelphia"))
 
 
 def load_businesses(city: str | None) -> pd.DataFrame:
@@ -58,16 +60,6 @@ def load_reviews(keep_ids: set[str]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def k_core(reviews: pd.DataFrame, k_user: int, k_item: int) -> pd.DataFrame:
-    """Iteratively drop users and items with too few interactions until stable."""
-    while True:
-        n = len(reviews)
-        uc = reviews.user_id.value_counts()
-        reviews = reviews[reviews.user_id.isin(uc[uc >= k_user].index)]
-        bc = reviews.business_id.value_counts()
-        reviews = reviews[reviews.business_id.isin(bc[bc >= k_item].index)]
-        if len(reviews) == n:
-            return reviews
 
 
 def main():

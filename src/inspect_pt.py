@@ -1,8 +1,8 @@
 """Pretty-print the contents of a .pt file (dict of tensors / lists).
 
-    python src/inspect_pt.py data/processed/features.pt
-    python src/inspect_pt.py data/processed/features.pt --key absa_scores
-    python src/inspect_pt.py data/processed/features.pt --row 0
+    python src/inspect_pt.py data/yelp_philadelphia/features.pt
+    python src/inspect_pt.py data/yelp_philadelphia/features.pt --key absa_scores
+    python src/inspect_pt.py data/yelp_philadelphia/features.pt --row 0
 """
 
 import argparse

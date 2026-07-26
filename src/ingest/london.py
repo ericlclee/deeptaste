@@ -33,7 +33,7 @@ restaurant_name: names collide across chains and locations, which would merge
 distinct restaurants into one item.
 
 Usage:
-    python src/prepare_london.py
+    python src/ingest/london.py
 """
 
 import argparse
@@ -43,14 +43,14 @@ from pathlib import Path
 
 import pandas as pd
 
-from prepare_data import k_core
+from common import k_core
 
 RAW = Path(os.environ.get("DEEP_TASTE_RAW", "data/raw"))
 # Deliberately NOT defaulting to data/processed: that directory holds the Yelp
 # build, and this script would overwrite businesses.parquet/reviews.parquet in
 # place. London is a different source, so it gets its own directory and the two
 # never collide -- every downstream script already reads DEEP_TASTE_DATA.
-OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/london"))
+OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/london_tripadvisor"))
 
 # Only the columns we actually consume. review_preview is a truncated copy of
 # review_full, and title_review/sample/parse_count are unused -- skipping them

@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pandas as pd
 
-OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/processed"))
+OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/yelp_philadelphia"))
 
 
 def main():
