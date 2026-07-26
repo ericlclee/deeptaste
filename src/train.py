@@ -249,8 +249,8 @@ def main():
     p.add_argument(
         "--init-checkpoint",
         default=None,
-        help="warm-start the encoder from a checkpoint (e.g. pretrain_encoder.py's "
-        "content-similarity pretraining) instead of random init",
+        help="warm-start the encoder from an existing checkpoint instead of "
+        "random init",
     )
     p.add_argument("--eval-k", type=int, default=10)  # k for the per-epoch HR/NDCG
     p.add_argument("--eval-batch-size", type=int, default=512)

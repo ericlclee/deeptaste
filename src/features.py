@@ -18,9 +18,8 @@ train reviews only -- see "numerics" below) was previously documented here as
 a Yelp-only exception, on the grounds that Google Places doesn't return a
 rating distribution. That is true of the Places *API* but not of the source:
 Apify's Google Maps scraper returns reviewsDistribution (a 1-5 star
-histogram), which yields the identical quantity -- verified against
-per-review stars in src/test_adapt_google.py. So the contract is portable
-after all; the constraint was the API, not Google. See src/adapt_google.py.
+histogram), which yields the identical quantity. So the contract is
+portable after all; the constraint was the API, not Google.
 
 Tags are encoded by running the tag *name* through the sentence encoder rather
 than a learned nn.Embedding, so an unseen vocabulary ("chinese_restaurant")

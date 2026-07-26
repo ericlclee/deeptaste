@@ -192,7 +192,7 @@ class RestaurantEncoder(nn.Module):
         """Content-only embedding, pre-normalization and without the id term.
 
         This is the path that generalizes to unseen restaurants, so it is also
-        what content pretraining (src/pretrain_encoder.py) trains.
+        what any content-only pretraining stage would train.
         """
         return self.fuse(
             name_emb=self.name_emb[idx],
@@ -205,7 +205,8 @@ class RestaurantEncoder(nn.Module):
 
     def embed_new(self, **features: torch.Tensor) -> torch.Tensor:
         """Embed a restaurant that is NOT in the training catalog (e.g. one just
-        scraped from Google Maps -- see src/adapt_google.py).
+        ingested from a different source, or seen for the first time at
+        serve time).
 
         Content path only: there is no id embedding or bias for a restaurant the
         model has never seen, which is the correct cold-start behaviour rather

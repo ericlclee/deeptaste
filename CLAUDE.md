@@ -74,7 +74,7 @@ regardless of how good the features are. The id term absorbs that residual;
 it is initialized near zero so the model stays content-driven unless the data
 demands memorization, and `--no-id-emb` ablates it to measure the split.
 Cold-start still works because the content path is intact and is what
-`pretrain_encoder.py` trains.
+`embed_new()` uses for a restaurant absent from the catalog.
 
 **Item bias.** Score is `cos(user, item) + item_bias`, not cosine alone. Both
 towers are L2-normalized, which deletes any notion of "this place is just
