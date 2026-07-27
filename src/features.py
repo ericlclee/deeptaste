@@ -391,7 +391,16 @@ def main():
         # KMeans on a single metro's coordinates (src/ingest/yelp.py already filters to
         # one city) -- plain Euclidean in degree-space, not haversine, consistent
         # with lat/lng elsewhere in this file; fine at metro scale.
-        latlng_raw = np.stack([lat, lng], 1)
+        # Project to km on a local tangent plane BEFORE clustering. At this
+        # latitude a degree of longitude is ~84 km against ~111 km for
+        # latitude, so Euclidean KMeans on raw degrees stretches every cluster
+        # east-west by 1.32x. It also leaves dist_center/dist_cluster in mixed
+        # units, which means something different in every city -- in km they
+        # are directly comparable, so "2 km from the centre" transfers.
+        lat0, lng0 = float(lat.mean()), float(lng.mean())
+        km_per_lat = 111.32
+        km_per_lng = 111.32 * float(np.cos(np.radians(lat0)))
+        latlng_raw = np.stack([(lat - lat0) * km_per_lat, (lng - lng0) * km_per_lng], 1)
         # A fixed k does not survive a change of city. 25 was chosen for
         # Philadelphia's 6,176 restaurants; reused on NYC's 21,176 across five
         # boroughs, each cluster would span more than three times the area and
@@ -411,6 +420,7 @@ def main():
         dist_cluster = np.linalg.norm(latlng_raw - centers[cluster_id], axis=1).astype(np.float32)
         cluster_counts = np.bincount(cluster_id, minlength=n_clusters)
         log_cluster_size = np.log1p(cluster_counts[cluster_id]).astype(np.float32)
+        print(f"cluster radius km: mean {dist_cluster.mean():.2f} p90 {np.percentile(dist_cluster, 90):.2f} | sizes {cluster_counts.min()}-{cluster_counts.max()}")
 
         dist_center_z, dc_mu, dc_sd = zscore(dist_center)
         dist_cluster_z, dk_mu, dk_sd = zscore(dist_cluster)
@@ -451,6 +461,10 @@ def main():
                 "log_cluster_size": [ls_mu, ls_sd],
                 "n_geo_clusters": n_clusters,
                 "city_center": city_center.tolist(),
+                # centroids live in km-from-(lat0,lng0) space, so anything
+                # featurizing a new restaurant must apply the same projection
+                "geo_projection": {"lat0": lat0, "lng0": lng0,
+                                   "km_per_lat": km_per_lat, "km_per_lng": km_per_lng},
                 # cluster centers, so a new restaurant at serve time is assigned to
                 # the nearest existing cluster rather than refitting KMeans on one
                 # point -- and their sizes, without which log_cluster_size is not
