@@ -95,7 +95,7 @@ class RestaurantEncoder(nn.Module):
         if self.has_geo:
             self.register_buffer(
                 "geo", features["geo"]
-            )  # (N, 5) z-scored: lat, lng, dist_center, dist_cluster, log_cluster_size
+            )  # (N, 3) z-scored km: dist_center, dist_cluster, log_cluster_size
         self.n_restaurants = self.absa_scores.shape[0]
         self.output_dims = output_dims
         self.use_id_emb = use_id_emb
@@ -160,7 +160,7 @@ class RestaurantEncoder(nn.Module):
         numeric: torch.Tensor,  # (B, 3-4) z-scored
         tag_vec: torch.Tensor | None = None,  # (B, tag_dims) already pooled
         price: torch.Tensor | None = None,  # (B,) long, tier 0..4
-        geo: torch.Tensor | None = None,  # (B, 5) z-scored
+        geo: torch.Tensor | None = None,  # (B, 3) z-scored
     ) -> torch.Tensor:
         """The content path, over RAW feature tensors rather than catalog indices.
 

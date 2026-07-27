@@ -384,8 +384,14 @@ def main():
     if has_geo:
         lat = biz.latitude.to_numpy(dtype=np.float32)
         lng = biz.longitude.to_numpy(dtype=np.float32)
-        lat_z, lat_mu, lat_sd = zscore(lat)
-        lng_z, lng_mu, lng_sd = zscore(lng)
+        # Raw lat/lng are deliberately NOT features. Z-scored, they say "0.8
+        # standard deviations north of this city's centre", which is
+        # meaningless in any other city -- the model would learn NYC's specific
+        # north-south taste gradient and carry nonsense to London. The three
+        # columns kept below are city-relative and in real kilometres, so they
+        # mean the same thing anywhere. lat/lng still ship in features.pt for
+        # the geo baseline and for clustering a new restaurant; they just are
+        # not fed to the encoder.
 
         # ---- geo clusters: cheap "which neighborhood" signal on top of raw
         # lat/lng, over a single metro's coordinates (the ingest step filters to
@@ -452,8 +458,6 @@ def main():
     if has_geo:
         stats.update(
             {
-                "lat": [lat_mu, lat_sd],
-                "lng": [lng_mu, lng_sd],
                 "dist_center": [dc_mu, dc_sd],
                 "dist_cluster": [dk_mu, dk_sd],
                 "log_cluster_size": [ls_mu, ls_sd],
@@ -496,7 +500,7 @@ def main():
         out.update(
             {
                 "geo": torch.from_numpy(
-                    np.stack([lat_z, lng_z, dist_center_z, dist_cluster_z, log_cluster_size_z], 1)
+                    np.stack([dist_center_z, dist_cluster_z, log_cluster_size_z], 1)
                 ),
                 "latlng": torch.from_numpy(np.stack([lat, lng], 1)),
             }
