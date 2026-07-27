@@ -74,7 +74,8 @@ TOKEN_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
 # Words carrying no cuisine information. "restaurant" is on 100% of a
 # restaurant catalog by construction (the ingest filters on it), so it is a
 # constant input; the rest are grammatical.
-TAG_STOPWORDS = {"restaurant", "and", "us", "the", "of"}
+TAG_STOPWORDS = {"restaurant", "and", "us", "the", "of", "at", "for", "in",
+                 "with", "a", "to", "on", "or"}
 
 
 def tokenize_tags(cats: str) -> list[list[str]]:
@@ -97,11 +98,14 @@ def tokenize_tags(cats: str) -> list[list[str]]:
 def learn_tag_merges(tokenized, threshold: float, min_df: int) -> list[tuple[str, str]]:
     """Adjacent word pairs that bind tightly enough to be one token.
 
-    Scored by pointwise mutual information: how much more often the pair occurs
-    than it would if the two words were independent. Real compounds ("dim sum",
-    "tex mex", "puerto rican") score high because the words barely occur apart;
-    incidental adjacency ("bar restaurant", "delivery chinese") scores at or
-    below zero because both words are independently common.
+    Scored by NORMALIZED pointwise mutual information. Plain PMI measures how
+    much more often a pair occurs than chance, but it is biased against
+    frequent pairs: if "late" and "night" each appear on 34% of restaurants and
+    ALWAYS together, plain PMI is only log(1/0.34) = 1.08, below any threshold
+    that also excludes junk. Dividing by -log p(a,b) puts perfect co-occurrence
+    at 1.0 regardless of frequency, so "comfort food" (14,479 pairs) and "latin
+    american" (476) score alike. Incidental adjacency ("bar food", "catering
+    food") goes negative because both words are independently common.
 
     This is why the merge list is derived rather than hand-written: it finds
     "uzbeki", "shabu shabu" and "nuevo latino" without anyone enumerating the
@@ -121,8 +125,10 @@ def learn_tag_merges(tokenized, threshold: float, min_df: int) -> list[tuple[str
     for (a, b), count in big.items():
         if count < min_df or not uni[a] or not uni[b]:
             continue
-        pmi = math.log((count / n) / ((uni[a] / n) * (uni[b] / n)))
-        if pmi >= threshold:
+        p_ab = count / n
+        pmi = math.log(p_ab / ((uni[a] / n) * (uni[b] / n)))
+        npmi = pmi / -math.log(p_ab)
+        if npmi >= threshold:
             merges.append((a, b))
     return merges
 
@@ -175,10 +181,10 @@ def main():
         "restaurant is a 50/50 blend of its own reviews and the catalog mean; "
         "0 disables shrinkage",
     )
-    p.add_argument("--tag-pmi", type=float, default=2.0,
-                   help="merge adjacent category words above this pointwise mutual "
-                        "information. 2.0 keeps new_american/latin_american/asian_fusion; "
-                        "3.5 would shred them")
+    p.add_argument("--tag-npmi", type=float, default=0.40,
+                   help="merge adjacent category words above this NORMALIZED "
+                        "pointwise mutual information (range -1 to 1). 0.40 keeps "
+                        "comfort_food, korean_barbecue, cocktail_bar, new_american")
     p.add_argument("--tag-min-df", type=int, default=10,
                    help="drop category tokens appearing on fewer restaurants than this")
     p.add_argument("--batch-size", type=int, default=64)
@@ -241,7 +247,7 @@ def main():
     # about language, not about whether the same diners like both.
     if has_tags:
         tokenized = [tokenize_tags(c) for c in biz.categories]
-        merges = set(learn_tag_merges(tokenized, args.tag_pmi, args.tag_min_df))
+        merges = set(learn_tag_merges(tokenized, args.tag_npmi, args.tag_min_df))
         tag_sets = [tag_tokens(c, merges) for c in biz.categories]
 
         df = Counter(t for s in tag_sets for t in s)
@@ -252,7 +258,7 @@ def main():
         vocab_set = set(vocab)
         n_kept = sum(1 for s in tag_sets if s & vocab_set)
         print(
-            f"tags: {len(merges)} merged compounds (PMI>={args.tag_pmi}) | "
+            f"tags: {len(merges)} merged compounds (NPMI>={args.tag_npmi}) | "
             f"{len(df):,} tokens -> {len(vocab):,} kept at df>={args.tag_min_df} | "
             f"{n_kept / n * 100:.1f}% of restaurants keep >=1 "
             f"({n - n_kept:,} have no cuisine signal -- their only category was generic)"
@@ -442,7 +448,7 @@ def main():
         # recomputed from whatever reviews happen to be on hand.
         "tag_vocab": vocab if has_tags else [],
         "tag_merges": sorted("|".join(m) for m in merges) if has_tags else [],
-        "tag_pmi": args.tag_pmi,
+        "tag_npmi": args.tag_npmi,
         "tag_min_df": args.tag_min_df,
         "absa_prior": prior.reshape(-1).tolist(),
         "absa_kappa": args.absa_kappa,

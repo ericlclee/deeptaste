@@ -59,6 +59,45 @@ def parse_price(raw) -> float | None:
     return float(len(s)) if PRICE_RE.match(s) and len(set(s)) == 1 else None
 
 
+# MISC groups worth keeping. Excluded: Payments, Accessibility, Health &
+# safety and Service options -- near-universal or logistical, so they say
+# little about who would choose the place. Amenities is dropped as mostly
+# restroom/wifi noise.
+MISC_GROUPS = {
+    "Atmosphere",
+    "Crowd",
+    "Popular for",
+    "Highlights",
+    "Planning",
+    "Dining options",
+    "Offerings",
+}
+
+
+def misc_attributes(misc) -> list[str]:
+    """Google's own structured attributes, flattened into category-style strings.
+
+    These cover ground the review text cannot: "Solo dining", "Accepts
+    reservations", "Late-night food" and "LGBTQ friendly" are facts about the
+    restaurant, not sentiment about it. They are emitted alongside the
+    categories so the existing tag pipeline tokenizes and embeds them with no
+    separate branch -- "Late-night food" simply becomes the tokens late, night,
+    food, and PMI decides whether late_night binds.
+
+    Caveat worth remembering: these are partly owner-supplied, so coverage
+    tracks how actively a business manages its listing, and they carry no
+    timestamp -- unlike reviews they cannot be held to the training side of
+    the split.
+    """
+    if not isinstance(misc, dict):
+        return []
+    out = []
+    for group, items in misc.items():
+        if group in MISC_GROUPS:
+            out.extend(i for i in (items or []) if i)
+    return out
+
+
 def load_restaurants(bbox, category_match: str) -> pd.DataFrame:
     """Stream the metadata file, keeping in-box places whose category matches."""
     lat_min, lat_max, lng_min, lng_max = bbox
@@ -80,7 +119,7 @@ def load_restaurants(bbox, category_match: str) -> pd.DataFrame:
                 {
                     "business_id": d["gmap_id"],
                     "name": d.get("name") or "",
-                    "categories": ", ".join(cats),
+                    "categories": ", ".join(cats + misc_attributes(d.get("MISC"))),
                     "price": parse_price(d.get("price")),
                     "latitude": lat,
                     "longitude": lng,
