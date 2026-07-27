@@ -387,11 +387,9 @@ def main():
         lat_z, lat_mu, lat_sd = zscore(lat)
         lng_z, lng_mu, lng_sd = zscore(lng)
 
-        # ---- geo clusters: cheap "which neighborhood" signal on top of raw lat/lng.
-        # KMeans on a single metro's coordinates (src/ingest/yelp.py already filters to
-        # one city) -- plain Euclidean in degree-space, not haversine, consistent
-        # with lat/lng elsewhere in this file; fine at metro scale.
-        # Project to km on a local tangent plane BEFORE clustering. At this
+        # ---- geo clusters: cheap "which neighborhood" signal on top of raw
+        # lat/lng, over a single metro's coordinates (the ingest step filters to
+        # one city). Project to km on a local tangent plane BEFORE clustering. At this
         # latitude a degree of longitude is ~84 km against ~111 km for
         # latitude, so Euclidean KMeans on raw degrees stretches every cluster
         # east-west by 1.32x. It also leaves dist_center/dist_cluster in mixed
@@ -400,7 +398,7 @@ def main():
         lat0, lng0 = float(lat.mean()), float(lng.mean())
         km_per_lat = 111.32
         km_per_lng = 111.32 * float(np.cos(np.radians(lat0)))
-        latlng_raw = np.stack([(lat - lat0) * km_per_lat, (lng - lng0) * km_per_lng], 1)
+        xy_km = np.stack([(lat - lat0) * km_per_lat, (lng - lng0) * km_per_lng], 1)
         # A fixed k does not survive a change of city. 25 was chosen for
         # Philadelphia's 6,176 restaurants; reused on NYC's 21,176 across five
         # boroughs, each cluster would span more than three times the area and
@@ -412,12 +410,12 @@ def main():
         )
         print(f"geo clusters: {n_clusters} (~{n / n_clusters:.0f} restaurants each)")
         kmeans = KMeans(n_clusters=n_clusters, random_state=0, n_init=10)
-        cluster_id = kmeans.fit_predict(latlng_raw)
+        cluster_id = kmeans.fit_predict(xy_km)
         centers = kmeans.cluster_centers_
 
-        city_center = latlng_raw.mean(axis=0)
-        dist_center = np.linalg.norm(latlng_raw - city_center, axis=1).astype(np.float32)
-        dist_cluster = np.linalg.norm(latlng_raw - centers[cluster_id], axis=1).astype(np.float32)
+        city_center = xy_km.mean(axis=0)
+        dist_center = np.linalg.norm(xy_km - city_center, axis=1).astype(np.float32)
+        dist_cluster = np.linalg.norm(xy_km - centers[cluster_id], axis=1).astype(np.float32)
         cluster_counts = np.bincount(cluster_id, minlength=n_clusters)
         log_cluster_size = np.log1p(cluster_counts[cluster_id]).astype(np.float32)
         print(f"cluster radius km: mean {dist_cluster.mean():.2f} p90 {np.percentile(dist_cluster, 90):.2f} | sizes {cluster_counts.min()}-{cluster_counts.max()}")
