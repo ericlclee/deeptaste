@@ -224,22 +224,37 @@ def main():
         price = np.nan_to_num(price_raw, nan=0.0)
         print(f"price present for {price_mask.sum():,}/{n:,}")
 
-    # ---- numerics
-    rating_z, r_mu, r_sd = zscore(biz.stars.to_numpy(dtype=np.float32))
-    count_z, c_mu, c_sd = zscore(np.log1p(biz.review_count.to_numpy(dtype=np.float32)))
+    # ---- numerics: rating, review count and rating_std ALL from TRAIN reviews.
+    # The source's own averages (Yelp's business.stars, Google's avg_rating /
+    # num_of_reviews) are all-time aggregates that already include the val and
+    # test periods, so conditioning on them leaks held-out interactions into a
+    # feature -- and into the popularity baseline, which ranks by review count
+    # and would be flattered by counting reviews it is supposed to be
+    # predicting. Recomputing here keeps every numeric on the same side of the
+    # split boundary.
+    agg = train.groupby("business_id").stars.agg(["mean", "count", "std"]).reindex(biz.business_id)
+    n_no_train = int(agg["count"].isna().sum())
+
+    rating_raw = agg["mean"].fillna(agg["mean"].median()).to_numpy(dtype=np.float32)
+    count_raw = agg["count"].fillna(0).to_numpy(dtype=np.float32)
+    # <2 train reviews leaves std undefined -- fill with the population median
+    # (neutral), not 0, which would falsely assert "perfectly consistent" for a
+    # restaurant we simply have no variance evidence for.
+    n_missing_std = int(agg["std"].isna().sum())
+    rating_std_raw = agg["std"].fillna(agg["std"].median()).to_numpy(dtype=np.float32)
+
+    rating_z, r_mu, r_sd = zscore(rating_raw)
+    count_z, c_mu, c_sd = zscore(np.log1p(count_raw))
+    rating_std_z, rs_mu, rs_sd = zscore(rating_std_raw)
     if has_tags:
         tag_count_z, t_mu, t_sd = zscore(np.array([len(t) for t in tag_lists], dtype=np.float32))
 
-    # rating_std: within-restaurant disagreement, from TRAIN reviews only (same
-    # leakage boundary as the ABSA pooling above). A restaurant with <2 train reviews
-    # has an undefined std -- fill with the population median (neutral), not 0,
-    # which would falsely assert "perfectly consistent" for a restaurant we
-    # simply have no variance evidence for.
-    rating_std_raw = train.groupby("business_id").stars.std().reindex(biz.business_id)
-    n_missing_std = int(rating_std_raw.isna().sum())
-    rating_std_raw = rating_std_raw.fillna(rating_std_raw.median()).to_numpy(dtype=np.float32)
-    print(f"rating_std: {n_missing_std} restaurants median-filled (fewer than 2 train reviews)")
-    rating_std_z, rs_mu, rs_sd = zscore(rating_std_raw)
+    print(f"numerics from train reviews | {n_no_train} restaurants with no train reviews, "
+          f"{n_missing_std} median-filled rating_std (fewer than 2)")
+    src_rating = biz.stars.to_numpy(dtype=np.float32)
+    drift = np.abs(rating_raw - src_rating)
+    print(f"train-derived vs source rating: mean |diff| {np.nanmean(drift):.3f} stars "
+          f"(nonzero = the leak this removes)")
 
     if has_geo:
         lat = biz.latitude.to_numpy(dtype=np.float32)

@@ -1,7 +1,20 @@
-"""Per-user temporal split: each user's most recent review is test, next-most-recent is val.
+"""Per-user temporal split: each user's most recent reviews are test, the ones
+before those are val, the rest train. Proportional by default (80/10/10), so a
+heavy reviewer contributes more held-out interactions than a light one.
 
-Must run before features.py. Restaurant text embeddings are built from training
-reviews only, so the split boundary has to exist before any text is encoded.
+Split is per-user rather than global-by-date so every user has a training
+history to build a profile from -- a global date cutoff would leave users who
+joined late with no history at all.
+
+Each held-out review is scored as its own ranking query, so a user with three
+test reviews contributes three queries rather than one. Other held-out reviews
+by the same user stay in the candidate set (only train+val are masked), which
+is correct: at the moment of any one visit, the others were genuinely still
+available choices.
+
+Must run before features.py. Restaurant features are built from training
+reviews only, so the split boundary has to exist before any of them are
+computed.
 
 Repeat visits are collapsed to the user's LATEST review of that restaurant before
 anything else happens (~4% of (user, restaurant) pairs, ~8% of all reviews --
@@ -16,6 +29,7 @@ import argparse
 import os
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/yelp_philadelphia"))
@@ -23,8 +37,8 @@ OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/yelp_philadelphia"))
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--n-test", type=int, default=1)
-    p.add_argument("--n-val", type=int, default=1)
+    p.add_argument("--test-frac", type=float, default=0.10)
+    p.add_argument("--val-frac", type=float, default=0.10)
     args = p.parse_args()
 
     reviews = pd.read_parquet(OUT / "reviews.parquet")
@@ -43,15 +57,27 @@ def main():
 
     # 0 = most recent review for that user
     recency = reviews.groupby("user_id").cumcount(ascending=False)
+    n_user = reviews.groupby("user_id").user_id.transform("size")
+
+    # At least one held-out review each, so no user is evaluated on nothing.
+    # Rounding rather than truncating: the median user has 16 reviews, so
+    # floor(0.10 * 16) = 1 for most of the catalog and the realised split
+    # drifts to 83/8/8. Rounding lands at 80/10/10 as asked. k-core >= 10
+    # guarantees a training history survives either way.
+    n_test = np.maximum(1, np.round(n_user * args.test_frac)).astype(int)
+    n_val = np.maximum(1, np.round(n_user * args.val_frac)).astype(int)
 
     reviews["split"] = "train"
-    reviews.loc[recency < args.n_test, "split"] = "test"
-    reviews.loc[
-        (recency >= args.n_test) & (recency < args.n_test + args.n_val), "split"
-    ] = "val"
+    reviews.loc[recency < n_test, "split"] = "test"
+    reviews.loc[(recency >= n_test) & (recency < n_test + n_val), "split"] = "val"
 
     counts = reviews.split.value_counts()
-    print(f"train {counts.get('train', 0):,} | val {counts.get('val', 0):,} | test {counts.get('test', 0):,}")
+    tot = len(reviews)
+    print(
+        f"train {counts.get('train', 0):,} ({counts.get('train', 0) / tot * 100:.1f}%) | "
+        f"val {counts.get('val', 0):,} ({counts.get('val', 0) / tot * 100:.1f}%) | "
+        f"test {counts.get('test', 0):,} ({counts.get('test', 0) / tot * 100:.1f}%)"
+    )
 
     train = reviews[reviews.split == "train"]
     print(f"users with train history: {train.user_id.nunique():,} / {reviews.user_id.nunique():,}")
