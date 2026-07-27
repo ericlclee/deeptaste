@@ -181,10 +181,14 @@ def main():
         "restaurant is a 50/50 blend of its own reviews and the catalog mean; "
         "0 disables shrinkage",
     )
-    p.add_argument("--tag-npmi", type=float, default=0.40,
+    p.add_argument("--tag-npmi", type=float, default=0.35,
                    help="merge adjacent category words above this NORMALIZED "
-                        "pointwise mutual information (range -1 to 1). 0.40 keeps "
-                        "comfort_food, korean_barbecue, cocktail_bar, new_american")
+                        "pointwise mutual information (range -1 to 1). 0.30 is a "
+                        "hard floor: chinese_takeaway scores 0.29, and merging it "
+                        "would stop 'Chinese takeaway' sharing the chinese token "
+                        "with 'Chinese restaurant' -- the whole point of splitting "
+                        "categories into words. 0.35 keeps that margin while "
+                        "admitting espresso_bar, salad_bar, pastry_shop")
     p.add_argument("--tag-min-df", type=int, default=10,
                    help="drop category tokens appearing on fewer restaurants than this")
     p.add_argument("--batch-size", type=int, default=64)
