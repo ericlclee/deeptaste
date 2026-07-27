@@ -61,6 +61,10 @@ OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/yelp_philadelphia"))
 # is recorded in norm_stats.json so features can be traced back to their model.
 MODEL = os.environ.get("DEEP_TASTE_SBERT", "thenlper/gte-base")
 
+# Target granularity for the geo clusters, in restaurants per cluster. Chosen
+# so the rule reproduces the hand-picked k=25 on Philadelphia (6,176 / 250).
+RESTAURANTS_PER_CLUSTER = 250
+
 
 # Unicode-aware: keeps accented cuisine words whole. A plain [a-z]+ pattern
 # splits "crêperie" into "cr"/"perie", which in a city this multilingual is not
@@ -181,9 +185,10 @@ def main():
     p.add_argument(
         "--n-geo-clusters",
         type=int,
-        default=25,
+        default=0,
         help="KMeans neighborhood clusters over restaurant lat/lng, for the "
-        "dist_cluster/log_cluster_size geo features",
+        "dist_cluster/log_cluster_size geo features. 0 = scale with catalog "
+        f"size at ~{RESTAURANTS_PER_CLUSTER} restaurants per cluster",
     )
     p.add_argument("--data-dir", default=str(OUT))
     p.add_argument("--source", default="yelp", help="recorded in norm_stats.json for provenance")
@@ -387,14 +392,24 @@ def main():
         # one city) -- plain Euclidean in degree-space, not haversine, consistent
         # with lat/lng elsewhere in this file; fine at metro scale.
         latlng_raw = np.stack([lat, lng], 1)
-        kmeans = KMeans(n_clusters=args.n_geo_clusters, random_state=0, n_init=10)
+        # A fixed k does not survive a change of city. 25 was chosen for
+        # Philadelphia's 6,176 restaurants; reused on NYC's 21,176 across five
+        # boroughs, each cluster would span more than three times the area and
+        # "distance to your neighbourhood centre" would mean something coarser.
+        # Holding restaurants-per-cluster constant keeps the feature comparable
+        # across cities -- and reproduces k=25 on Philadelphia exactly.
+        n_clusters = args.n_geo_clusters or int(
+            np.clip(round(n / RESTAURANTS_PER_CLUSTER), 10, 200)
+        )
+        print(f"geo clusters: {n_clusters} (~{n / n_clusters:.0f} restaurants each)")
+        kmeans = KMeans(n_clusters=n_clusters, random_state=0, n_init=10)
         cluster_id = kmeans.fit_predict(latlng_raw)
         centers = kmeans.cluster_centers_
 
         city_center = latlng_raw.mean(axis=0)
         dist_center = np.linalg.norm(latlng_raw - city_center, axis=1).astype(np.float32)
         dist_cluster = np.linalg.norm(latlng_raw - centers[cluster_id], axis=1).astype(np.float32)
-        cluster_counts = np.bincount(cluster_id, minlength=args.n_geo_clusters)
+        cluster_counts = np.bincount(cluster_id, minlength=n_clusters)
         log_cluster_size = np.log1p(cluster_counts[cluster_id]).astype(np.float32)
 
         dist_center_z, dc_mu, dc_sd = zscore(dist_center)
@@ -434,7 +449,7 @@ def main():
                 "dist_center": [dc_mu, dc_sd],
                 "dist_cluster": [dk_mu, dk_sd],
                 "log_cluster_size": [ls_mu, ls_sd],
-                "n_geo_clusters": args.n_geo_clusters,
+                "n_geo_clusters": n_clusters,
                 "city_center": city_center.tolist(),
                 # cluster centers, so a new restaurant at serve time is assigned to
                 # the nearest existing cluster rather than refitting KMeans on one

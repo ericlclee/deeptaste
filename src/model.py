@@ -106,7 +106,10 @@ class RestaurantEncoder(nn.Module):
         sbert_dims = self.name_emb.shape[1]
         self.price_dims = (int(self.price.max()) + 1) if self.has_price else 0
         self.name_proj = nn.Linear(sbert_dims, branch_dims)
-        self.absa_proj = nn.Linear(self.absa_scores.shape[1], branch_dims)
+        # No absa_proj. A Linear(12 -> 128) feeding straight into the fusion
+        # layer with no activation between composes into a single linear map,
+        # so it added 1,536 parameters and zero expressiveness -- a rank-12
+        # input cannot become rank-128. The 12 dims go into the concat as-is.
         if self.has_tags:
             # LEARNED, not a frozen sentence-encoder lookup. +2 for padding (0)
             # and OOV (1), so a city with a token this catalog never saw still
@@ -124,7 +127,12 @@ class RestaurantEncoder(nn.Module):
         dense_dims = self.price_dims + self.numeric.shape[1] + (self.geo.shape[1] if self.has_geo else 0)
         self.dense_proj = nn.Linear(dense_dims, branch_dims // 2)
 
-        mlp_input_dims = branch_dims * 2 + branch_dims // 2 + (tag_dims if self.has_tags else 0)
+        mlp_input_dims = (
+            branch_dims
+            + self.absa_scores.shape[1]
+            + branch_dims // 2
+            + (tag_dims if self.has_tags else 0)
+        )
         self.fusion = nn.Sequential(
             nn.Linear(mlp_input_dims, hidden_dims),
             nn.ReLU(),
@@ -183,7 +191,7 @@ class RestaurantEncoder(nn.Module):
         if self.has_geo:
             dense.append(geo)
 
-        wide = [self.name_proj(name_emb), self.absa_proj(absa)]
+        wide = [self.name_proj(name_emb), absa]
         if self.has_tags:
             wide.append(tag_vec)
         wide.append(self.dense_proj(torch.cat(dense, dim=1)))
