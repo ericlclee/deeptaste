@@ -362,7 +362,12 @@ def main():
     count_z, c_mu, c_sd = zscore(np.log1p(count_raw))
     rating_std_z, rs_mu, rs_sd = zscore(rating_std_raw)
     if has_tags:
-        tag_count_z, t_mu, t_sd = zscore(np.array([len(t) for t in tag_lists], dtype=np.float32))
+        # Count of KEPT tokens, not raw categories. Weak feature -- it largely
+        # measures how thoroughly the source documented a place rather than
+        # anything about the restaurant, so it is an ablation candidate.
+        tag_count_z, t_mu, t_sd = zscore(
+            np.array([len(s_ & vocab_set) for s_ in tag_sets], dtype=np.float32)
+        )
 
     print(f"numerics from train reviews | {n_no_train} restaurants with no train reviews, "
           f"{n_missing_std} median-filled rating_std (fewer than 2)")
