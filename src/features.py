@@ -21,11 +21,18 @@ Apify's Google Maps scraper returns reviewsDistribution (a 1-5 star
 histogram), which yields the identical quantity. So the contract is
 portable after all; the constraint was the API, not Google.
 
-Tags are encoded by running the tag *name* through the sentence encoder rather
-than a learned nn.Embedding, so an unseen vocabulary ("chinese_restaurant")
-lands near a known one ("Szechuan") with no retraining. tag_ids/tag_vecs below
-are a compression device, not vocab lock-in: any new tag can be encoded at
-serve time.
+Tags are split into WORDS, with tightly-bound pairs merged into one token by
+pointwise mutual information ("dim sum", "new american", "puerto rican"), then
+encoded by a learned embedding that lives in the model rather than here. A
+frozen sentence encoder places "Chinese" near "Japanese" because the words are
+similar -- a claim about language, not about whether the same diners like
+both. Word-level tokens also share parameters across "Chinese takeout" and
+"Chinese restaurant", which matters for a long tail where most raw words
+appear on fewer than 20 restaurants.
+
+The vocabulary and merge list are recorded in norm_stats.json and must be
+REUSED, not recomputed, for another city: the embedding table's row 47 has to
+mean the same token everywhere or nothing transfers.
 
 Review-derived features (absa_scores) are recency-weighted (w = exp(-age_years
 / tau)) rather than depth-capped. Effective pool depth then self-adjusts -- a
@@ -36,7 +43,10 @@ to a fixed depth.
 
 import argparse
 import json
+import math
 import os
+import re
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -52,11 +62,93 @@ OUT = Path(os.environ.get("DEEP_TASTE_DATA", "data/yelp_philadelphia"))
 MODEL = os.environ.get("DEEP_TASTE_SBERT", "thenlper/gte-base")
 
 
-def parse_tags(cats: str) -> list[str]:
+# Unicode-aware: keeps accented cuisine words whole. A plain [a-z]+ pattern
+# splits "crêperie" into "cr"/"perie", which in a city this multilingual is not
+# a corner case.
+TOKEN_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
+
+# Words carrying no cuisine information. "restaurant" is on 100% of a
+# restaurant catalog by construction (the ingest filters on it), so it is a
+# constant input; the rest are grammatical.
+TAG_STOPWORDS = {"restaurant", "and", "us", "the", "of"}
+
+
+def tokenize_tags(cats: str) -> list[list[str]]:
+    """'Chinese restaurant, Takeout Restaurant' -> [['chinese','restaurant'], ...]"""
     if not cats:
         return []
-    drop = {"Restaurants", "Food"}
-    return [t.strip() for t in cats.split(",") if t.strip() and t.strip() not in drop]
+    out = []
+    for t in str(cats).split(","):
+        if not t.strip():
+            continue
+        # Stopwords are dropped HERE, before merging, so a compound can never
+        # form across one -- otherwise "Food and drink" yields and_drink and
+        # "Fruit and vegetable store" yields fruit_and, both meaningless.
+        words = [w for w in TOKEN_RE.findall(t.lower()) if w not in TAG_STOPWORDS]
+        if words:
+            out.append(words)
+    return out
+
+
+def learn_tag_merges(tokenized, threshold: float, min_df: int) -> list[tuple[str, str]]:
+    """Adjacent word pairs that bind tightly enough to be one token.
+
+    Scored by pointwise mutual information: how much more often the pair occurs
+    than it would if the two words were independent. Real compounds ("dim sum",
+    "tex mex", "puerto rican") score high because the words barely occur apart;
+    incidental adjacency ("bar restaurant", "delivery chinese") scores at or
+    below zero because both words are independently common.
+
+    This is why the merge list is derived rather than hand-written: it finds
+    "uzbeki", "shabu shabu" and "nuevo latino" without anyone enumerating the
+    world's cuisines, and it transfers to a new city's vocabulary unchanged.
+    """
+    uni, big = Counter(), Counter()
+    for cats in tokenized:
+        u, b = set(), set()
+        for words in cats:
+            u.update(words)
+            b.update(zip(words, words[1:]))
+        uni.update(u)
+        big.update(b)
+
+    n = max(len(tokenized), 1)
+    merges = []
+    for (a, b), count in big.items():
+        if count < min_df or not uni[a] or not uni[b]:
+            continue
+        pmi = math.log((count / n) / ((uni[a] / n) * (uni[b] / n)))
+        if pmi >= threshold:
+            merges.append((a, b))
+    return merges
+
+
+def apply_merges(words: list[str], merges: set[tuple[str, str]]) -> list[str]:
+    """Left-to-right, repeated to convergence so trigrams form: hot+dog ->
+    hot_dog, then hot_dog+stand -> hot_dog_stand."""
+    changed = True
+    while changed:
+        changed = False
+        out, i = [], 0
+        while i < len(words):
+            if i + 1 < len(words) and (words[i], words[i + 1]) in merges:
+                out.append(f"{words[i]}_{words[i + 1]}")
+                i += 2
+                changed = True
+            else:
+                out.append(words[i])
+                i += 1
+        words = out
+    return words
+
+
+def tag_tokens(cats: str, merges: set[tuple[str, str]]) -> set[str]:
+    """Final token SET for one restaurant. A set, not a list: 'Chinese takeout'
+    plus 'Chinese restaurant' should say chinese once, not twice."""
+    toks = set()
+    for words in tokenize_tags(cats):
+        toks.update(apply_merges(words, merges))
+    return toks
 
 
 def zscore(x: np.ndarray) -> tuple[np.ndarray, float, float]:
@@ -79,6 +171,12 @@ def main():
         "restaurant is a 50/50 blend of its own reviews and the catalog mean; "
         "0 disables shrinkage",
     )
+    p.add_argument("--tag-pmi", type=float, default=2.0,
+                   help="merge adjacent category words above this pointwise mutual "
+                        "information. 2.0 keeps new_american/latin_american/asian_fusion; "
+                        "3.5 would shred them")
+    p.add_argument("--tag-min-df", type=int, default=10,
+                   help="drop category tokens appearing on fewer restaurants than this")
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument(
         "--n-geo-clusters",
@@ -128,21 +226,38 @@ def main():
     )
     print(f"modalities present: tags={has_tags} price={has_price} geo={has_geo}")
 
-    # ---- tags
+    # ---- tags: word-level, learned downstream rather than frozen SBERT.
+    # Categories are split into words so "Chinese takeout" and "Chinese
+    # restaurant" share a `chinese` parameter instead of being unrelated
+    # strings, which matters for the long tail -- 403 of 617 raw words appear
+    # on fewer than 20 restaurants. The vectors themselves live in the model
+    # (nn.Embedding) rather than here: a frozen sentence encoder places
+    # "Chinese" near "Japanese" because the WORDS are similar, which is a claim
+    # about language, not about whether the same diners like both.
     if has_tags:
-        tag_lists = [parse_tags(c) for c in biz.categories]
-        vocab = sorted({t for tags in tag_lists for t in tags})
-        tag_to_id = {t: i + 1 for i, t in enumerate(vocab)}  # 0 = padding
-        print(f"{len(vocab):,} unique tags")
+        tokenized = [tokenize_tags(c) for c in biz.categories]
+        merges = set(learn_tag_merges(tokenized, args.tag_pmi, args.tag_min_df))
+        tag_sets = [tag_tokens(c, merges) for c in biz.categories]
 
-        tag_vecs = np.zeros((len(vocab) + 1, dim), dtype=np.float32)
-        tag_vecs[1:] = sbert.encode(vocab, batch_size=args.batch_size, show_progress_bar=True)
+        df = Counter(t for s in tag_sets for t in s)
+        # 0 = padding, 1 = OOV so a city with a token this catalog never saw
+        # still encodes rather than crashing.
+        vocab = sorted(t for t, c in df.items() if c >= args.tag_min_df)
+        tag_to_id = {t: i + 2 for i, t in enumerate(vocab)}
+        vocab_set = set(vocab)
+        n_kept = sum(1 for s in tag_sets if s & vocab_set)
+        print(
+            f"tags: {len(merges)} merged compounds (PMI>={args.tag_pmi}) | "
+            f"{len(df):,} tokens -> {len(vocab):,} kept at df>={args.tag_min_df} | "
+            f"{n_kept / n * 100:.1f}% of restaurants keep >=1 "
+            f"({n - n_kept:,} have no cuisine signal -- their only category was generic)"
+        )
 
-        t_max = max((len(t) for t in tag_lists), default=1)
+        t_max = max((len(s & set(vocab)) for s in tag_sets), default=1) or 1
         tag_ids = np.zeros((n, t_max), dtype=np.int64)
         tag_mask = np.zeros((n, t_max), dtype=bool)
-        for i, tags in enumerate(tag_lists):
-            for j, t in enumerate(tags):
+        for i, s in enumerate(tag_sets):
+            for j, t in enumerate(sorted(t for t in s if t in tag_to_id)):
                 tag_ids[i, j] = tag_to_id[t]
                 tag_mask[i, j] = True
         print(f"tag matrix: {tag_ids.shape}")
@@ -291,6 +406,10 @@ def main():
         # restaurant with 3 reviews needs this to be pooled the same way the
         # training catalog was, so it must travel with the stats, not be
         # recomputed from whatever reviews happen to be on hand.
+        "tag_vocab": vocab if has_tags else [],
+        "tag_merges": sorted("|".join(m) for m in merges) if has_tags else [],
+        "tag_pmi": args.tag_pmi,
+        "tag_min_df": args.tag_min_df,
         "absa_prior": prior.reshape(-1).tolist(),
         "absa_kappa": args.absa_kappa,
         "recency_tau_years": args.tau,
@@ -333,7 +452,6 @@ def main():
         out.update(
             {
                 "tag_vocab": vocab,
-                "tag_vecs": torch.from_numpy(tag_vecs),
                 "tag_ids": torch.from_numpy(tag_ids),
                 "tag_mask": torch.from_numpy(tag_mask),
             }

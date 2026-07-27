@@ -37,7 +37,6 @@ MIN_PROFILE_NORM = 1e-6
 
 
 class RestaurantEncoder(nn.Module):
-    tag_vecs: torch.Tensor
     tag_ids: torch.Tensor
     tag_mask: torch.Tensor
     absa_scores: torch.Tensor
@@ -53,6 +52,7 @@ class RestaurantEncoder(nn.Module):
         branch_dims: int = 128,
         hidden_dims: int = 256,
         dropout: float = 0.2,
+        tag_dims: int = 32,
         use_id_emb: bool = True,
         id_init_std: float = 0.01,
     ):
@@ -73,14 +73,14 @@ class RestaurantEncoder(nn.Module):
         # price tier or coordinates, so those branches are simply not built
         # rather than being fed placeholder values -- a constant input would
         # still consume fusion width and let the model fit noise through it.
-        self.has_tags = "tag_vecs" in features
+        self.has_tags = "tag_ids" in features
         self.has_price = "price" in features
         self.has_geo = "geo" in features
 
         if self.has_tags:
-            self.register_buffer("tag_vecs", features["tag_vecs"])
             self.register_buffer("tag_ids", features["tag_ids"])  # (N, T_max) int
             self.register_buffer("tag_mask", features["tag_mask"])  # (N, T_max) bool
+            self.tag_vocab = list(features.get("tag_vocab", []))
         # (N, n_aspects * n_labels) -- recency-weighted food/service/price/ambience
         # sentiment from src/absa_tag_reviews.py, flattened.
         self.register_buffer("absa_scores", features["absa_scores"])
@@ -108,7 +108,14 @@ class RestaurantEncoder(nn.Module):
         self.name_proj = nn.Linear(sbert_dims, branch_dims)
         self.absa_proj = nn.Linear(self.absa_scores.shape[1], branch_dims)
         if self.has_tags:
-            self.tag_proj = nn.Linear(sbert_dims, branch_dims)
+            # LEARNED, not a frozen sentence-encoder lookup. +2 for padding (0)
+            # and OOV (1), so a city with a token this catalog never saw still
+            # encodes. Sum-pooled rather than averaged: summing lets an
+            # uninformative token shrink its own vector toward zero, which is
+            # IDF weighting learned from data instead of imposed by a formula.
+            # A mean would renormalise that away.
+            self.tag_emb = nn.Embedding(len(self.tag_vocab) + 2, tag_dims, padding_idx=0)
+            nn.init.normal_(self.tag_emb.weight, std=0.1)
         # Price/numeric/geo are only ~14 raw dims against the wide 128-dim
         # branches, so at init they contribute ~4% of the concatenated width --
         # despite containing star rating and distance, plausibly the two most
@@ -117,8 +124,7 @@ class RestaurantEncoder(nn.Module):
         dense_dims = self.price_dims + self.numeric.shape[1] + (self.geo.shape[1] if self.has_geo else 0)
         self.dense_proj = nn.Linear(dense_dims, branch_dims // 2)
 
-        n_wide = 3 if self.has_tags else 2  # name + absa [+ tags]
-        mlp_input_dims = branch_dims * n_wide + branch_dims // 2
+        mlp_input_dims = branch_dims * 2 + branch_dims // 2 + (tag_dims if self.has_tags else 0)
         self.fusion = nn.Sequential(
             nn.Linear(mlp_input_dims, hidden_dims),
             nn.ReLU(),
@@ -135,21 +141,16 @@ class RestaurantEncoder(nn.Module):
         nn.init.zeros_(self.item_bias.weight)
 
     def _pool_tags(self, idx: torch.Tensor) -> torch.Tensor:
-        """Masked mean of a restaurant's tag vectors. Returns (B, 768)."""
-        ids = self.tag_ids[idx]  # (B, T_max)
-        mask = self.tag_mask[idx]  # (B, T_max)
-        vecs = self.tag_vecs[ids]  # (B, T_max, 768)
-
-        count = mask.sum(dim=1, keepdim=True).clamp(min=1)
-        vecs = vecs.sum(dim=1) / count
-        return vecs
+        """Masked SUM of a restaurant's learned token vectors. (B, tag_dims)."""
+        vecs = self.tag_emb(self.tag_ids[idx])  # (B, T_max, tag_dims)
+        return (vecs * self.tag_mask[idx].unsqueeze(-1)).sum(dim=1)
 
     def fuse(
         self,
         name_emb: torch.Tensor,  # (B, sbert_dims)
         absa: torch.Tensor,  # (B, n_aspects * n_labels)
         numeric: torch.Tensor,  # (B, 3-4) z-scored
-        tag_vec: torch.Tensor | None = None,  # (B, sbert_dims) already pooled
+        tag_vec: torch.Tensor | None = None,  # (B, tag_dims) already pooled
         price: torch.Tensor | None = None,  # (B,) long, tier 0..4
         geo: torch.Tensor | None = None,  # (B, 5) z-scored
     ) -> torch.Tensor:
@@ -184,7 +185,7 @@ class RestaurantEncoder(nn.Module):
 
         wide = [self.name_proj(name_emb), self.absa_proj(absa)]
         if self.has_tags:
-            wide.append(self.tag_proj(tag_vec))
+            wide.append(tag_vec)
         wide.append(self.dense_proj(torch.cat(dense, dim=1)))
         return self.fusion(torch.cat(wide, dim=1))
 
